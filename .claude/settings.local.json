@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile ui/main_window.py core/session_manager.py)",
+      "Bash(python -m py_compile main.py providers/mock.py)",
+      "Bash(python -c \"import PyQt5, pyqtgraph\")",
+      "Bash(QT_QPA_PLATFORM=offscreen timeout 8 python main.py)",
+      "Bash(QT_QPA_PLATFORM=offscreen python main.py)",
+      "Bash(kill %1)",
+      "Read(//tmp/**)",
+      "Bash(tasklist)",
+      "Bash(QT_QPA_PLATFORM=offscreen /usr/bin/timeout 6 python -u main.py)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(QT_QPA_PLATFORM=offscreen /usr/bin/timeout 12 python -u main.py)",
+      "Bash(rm -f /tmp/out.log /tmp/out2.log /tmp/out3.log)"
+    ],
+    "additionalDirectories": [
+      "\\tmp"
+    ]
+  }
+}

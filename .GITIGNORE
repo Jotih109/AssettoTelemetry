@@ -1,0 +1,5 @@
+telemetry.json
+venv
+telemetry_data
+# telemetry_data/
+.vscode

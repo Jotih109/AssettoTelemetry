@@ -95,6 +95,9 @@ def run_mock_ac():
             graphics.isInPit = 1 if state.in_pit else 0
             graphics.isInPitLane = 1 if state.in_pit_lane else 0
             graphics.normalizedCarPosition = state.track_position
+            graphics.carCoordinates[0] = state.car_x
+            graphics.carCoordinates[1] = state.car_y
+            graphics.carCoordinates[2] = state.car_z
             
             # Feedback na tela
             if packet_id % 60 == 0:

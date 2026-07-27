@@ -119,6 +119,40 @@ def _track_profile(p):
     )
 
 
+def _generate_track_spline():
+    """Gera um traçado suave de pista (estilo Interlagos) usando Catmull-Rom Spline"""
+    keypoints = [
+        (0.0, 0.0),            # Reta dos boxes
+        (-100.0, 600.0),       # S do Senna
+        (-250.0, 500.0),       # Curva 2
+        (-150.0, 300.0),       # Curva do Sol
+        (200.0, -400.0),       # Descida do Lago
+        (400.0, -150.0),       # Ferradura
+        (500.0, 50.0),         # Laranjinha
+        (350.0, 350.0),        # Pinheirinho
+        (150.0, 200.0),        # Bico de Pato
+        (100.0, -50.0),        # Mergulho
+        (20.0, -300.0),        # Junção
+        (-40.0, -100.0),       # Subida dos boxes
+    ]
+    
+    pts = [keypoints[-1]] + keypoints + [keypoints[0], keypoints[1]]
+    track_path = []
+    for i in range(1, len(pts) - 2):
+        P0, P1, P2, P3 = pts[i-1], pts[i], pts[i+1], pts[i+2]
+        num_points = 50 
+        for t_step in range(num_points):
+            t = t_step / num_points
+            t2 = t * t
+            t3 = t2 * t
+            x = 0.5 * ((2 * P1[0]) + (-P0[0] + P2[0]) * t + (2*P0[0] - 5*P1[0] + 4*P2[0] - P3[0]) * t2 + (-P0[0] + 3*P1[0] - 3*P2[0] + P3[0]) * t3)
+            z = 0.5 * ((2 * P1[1]) + (-P0[1] + P2[1]) * t + (2*P0[1] - 5*P1[1] + 4*P2[1] - P3[1]) * t2 + (-P0[1] + 3*P1[1] - 3*P2[1] + P3[1]) * t3)
+            track_path.append((x, z))
+    return track_path
+
+_MOCK_TRACK_PATH = _generate_track_spline()
+
+
 def _ms_to_str(ms: int) -> str:
     if ms <= 0:
         return "--:--.---"
@@ -242,6 +276,11 @@ class MockTelemetryProvider(TelemetryProvider):
         state.track_position = progress
         state.distance_traveled = distance
         state.track_length = TRACK_LENGTH
+        
+        path_idx = int(progress * len(_MOCK_TRACK_PATH)) % len(_MOCK_TRACK_PATH)
+        state.car_x = _MOCK_TRACK_PATH[path_idx][0]
+        state.car_y = 0.0
+        state.car_z = _MOCK_TRACK_PATH[path_idx][1]
 
         # Delta em tempo real vs melhor volta (mesma lógica do SessionManager,
         # mantida aqui apenas para preencher o campo cru vindo do "jogo")

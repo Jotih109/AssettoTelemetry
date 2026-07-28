@@ -175,8 +175,8 @@ class MockTelemetryProvider(TelemetryProvider):
         self._last_tick = None
         self._start_time = time.perf_counter()
 
-        self._lap_ms = 0
-        self._last_lap_ms = 0
+        self._lap_ms = 0.0
+        self._last_lap_ms = 0.0
         self._best_lap_ms = 0
         self._lap_number = 1
 
@@ -210,7 +210,7 @@ class MockTelemetryProvider(TelemetryProvider):
         state = TelemetryState(is_connected=True)
 
         now = time.perf_counter()
-        dt_ms = int(max(0.0, now - self._last_tick) * 1000) if self._last_tick else 0
+        dt_ms = (max(0.0, now - self._last_tick) * 1000.0) if self._last_tick else 0.0
         self._last_tick = now
 
         self._lap_ms += dt_ms
@@ -267,9 +267,9 @@ class MockTelemetryProvider(TelemetryProvider):
         state.gear = gear
         state.turbo_boost = max(0.0, gas * 1.4 + random.uniform(-0.05, 0.05))
 
-        state.current_time = _ms_to_str(self._lap_ms)
-        state.last_time = _ms_to_str(self._last_lap_ms)
-        state.best_time = _ms_to_str(self._best_lap_ms)
+        state.current_time = _ms_to_str(int(self._lap_ms))
+        state.last_time = _ms_to_str(int(self._last_lap_ms))
+        state.best_time = _ms_to_str(int(self._best_lap_ms))
         state.sector_index = self._sector_index
         state.lap_number = self._lap_number
 

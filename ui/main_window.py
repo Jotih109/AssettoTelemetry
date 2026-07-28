@@ -148,50 +148,55 @@ class DashboardMainWindow(QMainWindow):
             plot.addItem(l2)
             return l1, l2
 
+        # Delta Tempo
+        self.plot_delta = CustomPlot("Delta Tempo", color="#FF9100", unit="s")
+        self.plot_delta.setYRange(-1.0, 1.0)
+        self.plot_delta.setXRange(0, 120)
+        self.plot_delta.setLimits(xMin=0, xMax=120, yMin=-10.0, yMax=10.0, minXRange=5, maxXRange=120)
+        self.cursor_delta = pg.InfiniteLine(pos=0, angle=90, pen=cursor_pen)
+        self.plot_delta.addItem(self.cursor_delta)
+        self.zero_line_delta = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen(color="#555555", style=Qt.DashLine))
+        self.plot_delta.addItem(self.zero_line_delta)
+        self.sector1_line_delta, self.sector2_line_delta = _sector_lines(self.plot_delta)
+
+        # Marcadores de setor — só no gráfico do topo, para não poluir a pilha
+        self.s1_text_delta = pg.TextItem("S1", color=T.TXT_UNIT, anchor=(0, 1))
+        self.s1_text_delta.setPos(31.6, 0.8)
+        self.plot_delta.addItem(self.s1_text_delta)
+
+        self.s2_text_delta = pg.TextItem("S2", color=T.TXT_UNIT, anchor=(0, 1))
+        self.s2_text_delta.setPos(63.3, 0.8)
+        self.plot_delta.addItem(self.s2_text_delta)
+
         # Velocidade
         self.plot_speed = CustomPlot("Velocidade", color=T.CH_SPEED, unit="km/h")
         self.plot_speed.setYRange(0, 300)
         self.plot_speed.setXRange(0, 120)
         self.plot_speed.setLimits(xMin=0, xMax=120, yMin=0, yMax=500, minXRange=5, maxXRange=120)
+        self.plot_speed.setXLink(self.plot_delta)
         self.cursor_speed = pg.InfiniteLine(pos=0, angle=90, pen=cursor_pen)
         self.plot_speed.addItem(self.cursor_speed)
         self.sector1_line_speed, self.sector2_line_speed = _sector_lines(self.plot_speed)
 
-        # Marcadores de setor — só no gráfico do topo, para não poluir a pilha
-        self.s1_text_speed = pg.TextItem("S1", color=T.TXT_UNIT, anchor=(0, 1))
-        self.s1_text_speed.setPos(31.6, 280)
-        self.plot_speed.addItem(self.s1_text_speed)
+        # Acelerador / Freio
+        self.plot_pedals = CustomPlot("Acelerador / Freio", color=T.CH_THROTTLE, unit="%")
+        self.plot_pedals.setYRange(-5, 110)
+        self.plot_pedals.setXRange(0, 120)
+        self.plot_pedals.setLimits(xMin=0, xMax=120, yMin=-5, yMax=110, minXRange=5, maxXRange=120)
+        self.plot_pedals.setXLink(self.plot_delta)
+        self.cursor_pedals = pg.InfiniteLine(pos=0, angle=90, pen=cursor_pen)
+        self.plot_pedals.addItem(self.cursor_pedals)
+        self.sector1_line_pedals, self.sector2_line_pedals = _sector_lines(self.plot_pedals)
 
-        self.s2_text_speed = pg.TextItem("S2", color=T.TXT_UNIT, anchor=(0, 1))
-        self.s2_text_speed.setPos(63.3, 280)
-        self.plot_speed.addItem(self.s2_text_speed)
-
-        # Acelerador
-        self.plot_gas = CustomPlot("Acelerador", color=T.CH_THROTTLE, unit="%")
-        self.plot_gas.setYRange(0, 105)
-        self.plot_gas.setXRange(0, 120)
-        self.plot_gas.setLimits(xMin=0, xMax=120, yMin=-5, yMax=110, minXRange=5, maxXRange=120)
-        self.cursor_gas = pg.InfiniteLine(pos=0, angle=90, pen=cursor_pen)
-        self.plot_gas.addItem(self.cursor_gas)
-        self.sector1_line_gas, self.sector2_line_gas = _sector_lines(self.plot_gas)
-
-        # Freio
-        self.plot_brake = CustomPlot("Freio", color=T.CH_BRAKE, unit="%")
-        self.plot_brake.setYRange(0, 105)
-        self.plot_brake.setXRange(0, 120)
-        self.plot_brake.setLimits(xMin=0, xMax=120, yMin=-5, yMax=110, minXRange=5, maxXRange=120)
-        self.cursor_brake = pg.InfiniteLine(pos=0, angle=90, pen=cursor_pen)
-        self.plot_brake.addItem(self.cursor_brake)
-        self.sector1_line_brake, self.sector2_line_brake = _sector_lines(self.plot_brake)
-
-        # RPM — último da pilha, é o único que mostra a régua de tempo
-        self.plot_rpm = CustomPlot("Motor", color=T.CH_RPM, unit="rpm", show_x=True)
-        self.plot_rpm.setYRange(0, 9000)
-        self.plot_rpm.setXRange(0, 120)
-        self.plot_rpm.setLimits(xMin=0, xMax=120, yMin=0, yMax=20000, minXRange=5, maxXRange=120)
-        self.cursor_rpm = pg.InfiniteLine(pos=0, angle=90, pen=cursor_pen)
-        self.plot_rpm.addItem(self.cursor_rpm)
-        self.sector1_line_rpm, self.sector2_line_rpm = _sector_lines(self.plot_rpm)
+        # Volante — último da pilha, é o único que mostra a régua de tempo
+        self.plot_steer = CustomPlot("Volante", color="#FFEA00", unit="°", show_x=True)
+        self.plot_steer.setYRange(-180, 180)
+        self.plot_steer.setXRange(0, 120)
+        self.plot_steer.setLimits(xMin=0, xMax=120, yMin=-1080, yMax=1080, minXRange=5, maxXRange=120)
+        self.plot_steer.setXLink(self.plot_delta)
+        self.cursor_steer = pg.InfiniteLine(pos=0, angle=90, pen=cursor_pen)
+        self.plot_steer.addItem(self.cursor_steer)
+        self.sector1_line_steer, self.sector2_line_steer = _sector_lines(self.plot_steer)
 
         # Curvas: a referência (ghost) é traçada mais grossa e translúcida,
         # sempre ATRÁS da volta atual — o mesmo esquema de sobreposição do i2.
@@ -201,23 +206,24 @@ class DashboardMainWindow(QMainWindow):
             return pg.mkPen(color=c, width=4.0)
 
         self.curve_ghost_speed = self.plot_speed.plot(pen=_ghost_pen(T.CH_SPEED))
-        self.curve_ghost_gas = self.plot_gas.plot(pen=_ghost_pen(T.CH_THROTTLE))
-        self.curve_ghost_brake = self.plot_brake.plot(pen=_ghost_pen(T.CH_BRAKE))
-        self.curve_ghost_rpm = self.plot_rpm.plot(pen=_ghost_pen(T.CH_RPM))
+        self.curve_ghost_gas = self.plot_pedals.plot(pen=_ghost_pen(T.CH_THROTTLE))
+        self.curve_ghost_brake = self.plot_pedals.plot(pen=_ghost_pen(T.CH_BRAKE))
+        self.curve_ghost_steer = self.plot_steer.plot(pen=_ghost_pen("#FFEA00"))
 
+        self.curve_delta = self.plot_delta.plot(pen=pg.mkPen(color="#FF9100", width=1.8))
         self.curve_speed = self.plot_speed.plot(pen=pg.mkPen(color=T.CH_SPEED, width=1.8))
-        self.curve_gas = self.plot_gas.plot(pen=pg.mkPen(color=T.CH_THROTTLE, width=1.8))
-        self.curve_brake = self.plot_brake.plot(pen=pg.mkPen(color=T.CH_BRAKE, width=1.8))
-        self.curve_rpm = self.plot_rpm.plot(pen=pg.mkPen(color=T.CH_RPM, width=1.8))
+        self.curve_gas = self.plot_pedals.plot(pen=pg.mkPen(color=T.CH_THROTTLE, width=1.8))
+        self.curve_brake = self.plot_pedals.plot(pen=pg.mkPen(color=T.CH_BRAKE, width=1.8))
+        self.curve_steer = self.plot_steer.plot(pen=pg.mkPen(color="#FFEA00", width=1.8))
 
         self.plot_splitter = QSplitter(Qt.Vertical)
         self.plot_splitter.setHandleWidth(2)
         self.plot_splitter.setStyleSheet(
             f"QSplitter::handle {{ background-color: {T.BG_APP}; }}")
+        self.plot_splitter.addWidget(self.plot_delta)
         self.plot_splitter.addWidget(self.plot_speed)
-        self.plot_splitter.addWidget(self.plot_gas)
-        self.plot_splitter.addWidget(self.plot_brake)
-        self.plot_splitter.addWidget(self.plot_rpm)
+        self.plot_splitter.addWidget(self.plot_pedals)
+        self.plot_splitter.addWidget(self.plot_steer)
         # Mesma altura para todos; o de baixo ganha um pouco por causa do eixo X
         for i in range(4):
             self.plot_splitter.setStretchFactor(i, 1)
@@ -341,7 +347,7 @@ class DashboardMainWindow(QMainWindow):
         # Só reaplica os limites quando a mudança é relevante (evita "tremer" o gráfico)
         if abs(target - self._graph_x_max) > 1.0:
             self._graph_x_max = target
-            for plot in (self.plot_speed, self.plot_gas, self.plot_brake, self.plot_rpm):
+            for plot in (self.plot_delta, self.plot_speed, self.plot_pedals, self.plot_steer):
                 plot.setXRange(0, target, padding=0)
                 plot.setLimits(xMin=0, xMax=target, minXRange=5, maxXRange=target)
 
@@ -395,17 +401,17 @@ class DashboardMainWindow(QMainWindow):
             if s1_end and s2_end:
                 break
         if s1_end:
+            self.sector1_line_delta.setValue(s1_end)
             self.sector1_line_speed.setValue(s1_end)
-            self.sector1_line_gas.setValue(s1_end)
-            self.sector1_line_brake.setValue(s1_end)
-            self.sector1_line_rpm.setValue(s1_end)
-            self.s1_text_speed.setPos(s1_end, self.plot_speed.viewRange()[1][1] * 0.9)
+            self.sector1_line_pedals.setValue(s1_end)
+            self.sector1_line_steer.setValue(s1_end)
+            self.s1_text_delta.setPos(s1_end, 0.8)
         if s2_end:
+            self.sector2_line_delta.setValue(s2_end)
             self.sector2_line_speed.setValue(s2_end)
-            self.sector2_line_gas.setValue(s2_end)
-            self.sector2_line_brake.setValue(s2_end)
-            self.sector2_line_rpm.setValue(s2_end)
-            self.s2_text_speed.setPos(s2_end, self.plot_speed.viewRange()[1][1] * 0.9)
+            self.sector2_line_pedals.setValue(s2_end)
+            self.sector2_line_steer.setValue(s2_end)
+            self.s2_text_delta.setPos(s2_end, 0.8)
 
     # -----------------------------------------------------------------------
     # Main telemetry update slot
@@ -445,10 +451,15 @@ class DashboardMainWindow(QMainWindow):
         self.bottom_strip.update_strip(state)
 
         # Valor ao vivo de cada canal, no canto do respectivo gráfico
+        self.plot_delta.set_live_value(f"{state.delta_time:+.2f}")
         self.plot_speed.set_live_value(f"{state.speed_kmh:.0f}")
-        self.plot_gas.set_live_value(f"{state.gas * 100:.0f}")
-        self.plot_brake.set_live_value(f"{state.brake * 100:.0f}")
-        self.plot_rpm.set_live_value(f"{state.rpm}")
+        gas_pct = int(state.gas * 100)
+        brk_pct = int(state.brake * 100)
+        self.plot_pedals.set_live_value(
+            f"<span style='color:{T.CH_THROTTLE};'>{gas_pct}</span> <span style='color:#aaaaaa;'>/</span> <span style='color:{T.CH_BRAKE};'>{brk_pct}</span>",
+            is_html=True
+        )
+        self.plot_steer.set_live_value(f"{state.steer_angle:.0f}")
 
         # --- Lap time cards ---
         curr_time_str = state.current_time if state.current_time else "--:--.---"
@@ -497,19 +508,24 @@ class DashboardMainWindow(QMainWindow):
         
         # Reference & Estimated lap
         best_ms = self._parse_time_ms(ref_lap_str)
+        last_lap = state.last_time if getattr(state, 'last_time', None) else "--:--.---"
+        
         if has_valid_reference and best_ms > 0:
             est_ms = best_ms + int(delta_val * 1000)
+            last_str = f"Última: {last_lap}"
             ref_str = f"Ref: {ref_lap_str}"
             est_str = f"Est: {self._format_ms(max(0, est_ms))}"
             self.lbl_ref_est_laps.setText(f"<div style='text-align: right;'>"
+                                          f"<span style='color: #aaaaaa;'>{last_str}</span>&nbsp;&nbsp;&nbsp;&nbsp;"
                                           f"<span style='color: #eedd82;'>{ref_str}</span>&nbsp;&nbsp;&nbsp;&nbsp;"
                                           f"<span style='color: #aaaaaa;'>{est_str}</span>"
                                           f"</div>")
         else:
-            self.lbl_ref_est_laps.setText("<div style='text-align: right;'>"
-                                          "<span style='color: #888888;'>Ref: --:--.---</span>&nbsp;&nbsp;&nbsp;&nbsp;"
-                                          "<span style='color: #888888;'>Est: --:--.---</span>"
-                                          "</div>")
+            self.lbl_ref_est_laps.setText(f"<div style='text-align: right;'>"
+                                          f"<span style='color: #aaaaaa;'>Última: {last_lap}</span>&nbsp;&nbsp;&nbsp;&nbsp;"
+                                          f"<span style='color: #888888;'>Ref: --:--.---</span>&nbsp;&nbsp;&nbsp;&nbsp;"
+                                          f"<span style='color: #888888;'>Est: --:--.---</span>"
+                                          f"</div>")
         
         # --- Sectors ---
         # Garantindo gatilho seguro usando os tempos salvos pelo session_manager
@@ -575,18 +591,19 @@ class DashboardMainWindow(QMainWindow):
         self._graph_frame_skip = (getattr(self, "_graph_frame_skip", 0) + 1) % self.GRAPH_EVERY_N_FRAMES
         if len(curr["times"]) > 0 and self._graph_frame_skip == 0:
             current_time_sec = curr["times"][-1]
+            self.cursor_delta.setValue(current_time_sec)
             self.cursor_speed.setValue(current_time_sec)
-            self.cursor_gas.setValue(current_time_sec)
-            self.cursor_brake.setValue(current_time_sec)
-            self.cursor_rpm.setValue(current_time_sec)
+            self.cursor_pedals.setValue(current_time_sec)
+            self.cursor_steer.setValue(current_time_sec)
 
             # --- Graph data ---
             gas_100 = [g * 100.0 for g in curr["gas"]]
             brake_100 = [b * 100.0 for b in curr["brake"]]
+            self.curve_delta.setData(curr["times"], curr.get("delta", []))
             self.curve_speed.setData(curr["times"], curr["speed"])
             self.curve_gas.setData(curr["times"], gas_100)
             self.curve_brake.setData(curr["times"], brake_100)
-            self.curve_rpm.setData(curr["times"], curr["rpm"])
+            self.curve_steer.setData(curr["times"], curr.get("steer", []))
 
             # Escala Y dinâmica para velocidade
             if curr["speed"]:
@@ -607,9 +624,12 @@ class DashboardMainWindow(QMainWindow):
                     self.plot_speed.setYRange(0, self._speed_y_max, padding=0)
                     self.plot_speed.setLimits(yMin=0, yMax=max(self._speed_y_max + 50, 350))
 
-            # Escala Y dinâmica para RPM
-            max_rpm_val = getattr(state, 'max_rpm', 9000.0)
-            self.plot_rpm.setYRange(0, max_rpm_val * 1.05, padding=0)
+            # Escala Y dinâmica para Delta
+            delta_arr = curr.get("delta", [])
+            if delta_arr:
+                max_d = max([abs(d) for d in delta_arr] + [1.0])
+                target_d = max_d * 1.2
+                self.plot_delta.setYRange(-target_d, target_d, padding=0)
             
         # --- Update Lap History dynamically by Lap ID ---
         self._update_live_lap_history(state)
@@ -729,7 +749,7 @@ class DashboardMainWindow(QMainWindow):
             self.curve_ghost_speed.setData([], [])
             self.curve_ghost_gas.setData([], [])
             self.curve_ghost_brake.setData([], [])
-            self.curve_ghost_rpm.setData([], [])
+            self.curve_ghost_steer.setData([], [])
             return
         elif idx == 1:
             ghost = self.session_manager.best_lap_ghost.get("telemetry", {})
@@ -742,16 +762,16 @@ class DashboardMainWindow(QMainWindow):
             x_data = ghost.get("times", [])
             ghost_gas_100 = [g * 100.0 for g in ghost.get("gas", [])]
             ghost_brake_100 = [b * 100.0 for b in ghost.get("brake", [])]
-            ghost_rpm = ghost.get("rpm", [0] * len(x_data))
+            ghost_steer = ghost.get("steer", [0] * len(x_data))
             self.curve_ghost_speed.setData(x_data, ghost["speed"])
             self.curve_ghost_gas.setData(x_data, ghost_gas_100)
             self.curve_ghost_brake.setData(x_data, ghost_brake_100)
-            self.curve_ghost_rpm.setData(x_data, ghost_rpm)
+            self.curve_ghost_steer.setData(x_data, ghost_steer)
         else:
             self.curve_ghost_speed.setData([], [])
             self.curve_ghost_gas.setData([], [])
             self.curve_ghost_brake.setData([], [])
-            self.curve_ghost_rpm.setData([], [])
+            self.curve_ghost_steer.setData([], [])
 
     def closeEvent(self, event):
         print("Parando Thread de Telemetria...")

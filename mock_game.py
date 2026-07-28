@@ -89,6 +89,22 @@ def run_mock_ac():
             graphics.currentTime = state.current_time
             graphics.lastTime = state.last_time
             graphics.bestTime = state.best_time
+            
+            def t_to_ms(t_str):
+                try:
+                    if not t_str or t_str.startswith("-"): return 0
+                    if "." in t_str:
+                        parts = t_str.rsplit(".", 1)
+                        m_s = parts[0].split(":")
+                        m = int(m_s[0]) if len(m_s) >= 2 else 0
+                        s = int(m_s[-1])
+                        return (m * 60 * 1000) + (s * 1000) + int(parts[1])
+                except: pass
+                return 0
+
+            graphics.iCurrentTime = t_to_ms(state.current_time)
+            graphics.iLastTime = t_to_ms(state.last_time)
+            graphics.iBestTime = t_to_ms(state.best_time)
             graphics.distanceTraveled = state.distance_traveled
             graphics.currentSectorIndex = state.sector_index
             graphics.completedLaps = state.completed_laps

@@ -1145,9 +1145,12 @@ class CustomPlot(pg.PlotWidget):
         super().resizeEvent(event)
         self._reposition_header()
 
-    def set_live_value(self, text: str):
+    def set_live_value(self, text: str, is_html: bool = False):
         """Atualiza o valor ao vivo mostrado no cabeçalho do gráfico."""
-        self.hdr_value.setText(f"{text} {self._unit}".strip())
+        if is_html:
+            self.hdr_value.setText(f"{text}&nbsp;<span style='color:{T.TXT_UNIT};'>{self._unit}</span>")
+        else:
+            self.hdr_value.setText(f"{text} {self._unit}".strip())
         self.hdr_value.adjustSize()
 
 

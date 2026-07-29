@@ -137,7 +137,7 @@ class DashboardMainWindow(QMainWindow):
         # a mesma escala, e repetir a régua em cada um só rouba espaço vertical.
         self._speed_y_max = 300.0  # escala Y dinâmica de velocidade
 
-        cursor_pen = pg.mkPen(color=T.BAD, width=1.0)
+        cursor_pen = pg.mkPen(color="#888888", width=1.0)
         sector_pen = pg.mkPen(color=T.BORDER, width=1.0, style=Qt.DashLine)
 
         def _sector_lines(plot):
@@ -178,8 +178,8 @@ class DashboardMainWindow(QMainWindow):
         self.plot_speed.addItem(self.cursor_speed)
         self.sector1_line_speed, self.sector2_line_speed = _sector_lines(self.plot_speed)
 
-        # Acelerador / Freio
-        self.plot_pedals = CustomPlot("Acelerador / Freio", color=T.CH_THROTTLE, unit="%")
+        # Pedais
+        self.plot_pedals = CustomPlot("Pedais", color=T.CH_THROTTLE, unit="%")
         self.plot_pedals.setYRange(-5, 110)
         self.plot_pedals.setXRange(0, 120)
         self.plot_pedals.setLimits(xMin=0, xMax=120, yMin=-5, yMax=110, minXRange=5, maxXRange=120)

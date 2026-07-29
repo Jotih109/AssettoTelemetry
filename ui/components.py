@@ -15,8 +15,9 @@ from PyQt5.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
     QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView, QWidget, QComboBox
 )
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont, QColor, QPainter, QPen
+from PyQt5.QtCore import Qt, QPointF
+from PyQt5.QtGui import QFont, QColor, QPainter, QPen, QPolygonF
+import math
 import pyqtgraph as pg
 
 from ui import theme as T
@@ -789,6 +790,78 @@ class WeatherCard(BaseCard):
         arrows = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"]
         idx = int(((direction_deg % 360) + 22.5) // 45) % 8
         return arrows[idx]
+
+
+class SteeringWheelWidget(QWidget):
+    """Visualizador gráfico do volante."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(60, 60)
+        self._angle = 0.0
+
+    def set_angle(self, angle: float):
+        self._angle = angle
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        w = self.width()
+        h = self.height()
+        side = min(w, h)
+        painter.translate(w / 2, h / 2)
+        
+        color = QColor(T.CH_STEER)
+        
+        pen_circle = QPen(color, max(4, int(side * 0.05)), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        pen_spoke = QPen(color, max(5, int(side * 0.08)), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        
+        radius = side / 2.0 - pen_circle.width()
+        
+        painter.setPen(pen_circle)
+        painter.drawEllipse(QPointF(0, 0), radius, radius)
+        
+        painter.save()
+        painter.rotate(self._angle)
+        
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(color)
+        
+        # Barra horizontal (raios laterais)
+        painter.drawRect(int(-radius + 2), -5, int(radius * 2 - 4), 10)
+        
+        # Barra vertical (raio inferior)
+        painter.drawRect(-5, 5, 10, int(radius - 5))
+        
+        painter.restore()
+
+
+class SteeringWheelCard(BaseCard):
+    """Cartão que contém o visualizador do volante e seu valor."""
+    def __init__(self):
+        super(SteeringWheelCard, self).__init__(title="Volante", margins=(0, 5, 0, 5))
+        
+        self.wheel_widget = SteeringWheelWidget()
+        self.wheel_widget.setFixedSize(80, 80)
+        
+        self.lbl_angle = QLabel("0.0°")
+        self.lbl_angle.setFont(QFont(T.FONT_MONO, 12, QFont.Bold))
+        self.lbl_angle.setAlignment(Qt.AlignCenter)
+        self.lbl_angle.setStyleSheet(f"color: {T.CH_STEER}; background: transparent; border: none;")
+        
+        lay = QVBoxLayout()
+        lay.setAlignment(Qt.AlignCenter)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        lay.addWidget(self.wheel_widget, alignment=Qt.AlignCenter)
+        lay.addWidget(self.lbl_angle, alignment=Qt.AlignCenter)
+        
+        self.body.addLayout(lay)
+        
+    def update_steer(self, steer_angle: float):
+        self.wheel_widget.set_angle(steer_angle)
+        self.lbl_angle.setText(f"{steer_angle:.1f}°")
 
 
 class SessionCard(BaseCard):

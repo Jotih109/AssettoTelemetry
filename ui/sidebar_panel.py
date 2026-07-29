@@ -5,7 +5,7 @@ from core.models import TelemetryState
 from ui import theme as T
 from ui.components import (
     GearCard, SpeedCard, RpmCard, CarDataCard, SessionCard, AssistsCard,
-    PedalsBarCard,
+    PedalsBarCard, SteeringWheelCard,
 )
 
 
@@ -69,6 +69,7 @@ class SidebarPanel(QWidget):
         self.car_data_card = CarDataCard()
         self.session_card = SessionCard()
         self.assists_card = AssistsCard()
+        self.steer_card = SteeringWheelCard()
 
         main_layout.addWidget(self.rpm_card)
 
@@ -77,6 +78,7 @@ class SidebarPanel(QWidget):
         gear_speed_col.setSpacing(6)
         gear_speed_col.addWidget(self.gear_card)
         gear_speed_col.addWidget(self.speed_card)
+        gear_speed_col.addWidget(self.steer_card)
 
         top_row = QHBoxLayout()
         top_row.setSpacing(6)
@@ -129,6 +131,9 @@ class SidebarPanel(QWidget):
             fuel_avg=getattr(state, '_fuel_avg', 0.0),
             fuel_capacity=state.fuel_capacity,
         )
+
+        # Update Steering Wheel
+        self.steer_card.update_steer(state.steer_angle)
 
         # Sessão
         self.session_card.update_session(state)

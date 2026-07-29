@@ -14,7 +14,7 @@ import collections
 from PyQt5.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
     QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView, QWidget, QComboBox, QSizePolicy,
-    QSpacerItem
+    QSpacerItem, QPushButton
 )
 from PyQt5.QtCore import Qt, QPointF
 from PyQt5.QtGui import QFont, QColor, QPainter, QPen, QPolygonF
@@ -612,7 +612,101 @@ class GhostSelectorCard(QWidget):
         layout.addWidget(self.combo, alignment=Qt.AlignVCenter)
 
 
+class LapSelectorCard(QWidget):
+    """Seletor e navegador da volta a ser exibida nos gráficos."""
+    def __init__(self):
+        super(LapSelectorCard, self).__init__()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        lbl_title = QLabel("VOLTA")
+        lbl_title.setFont(T.f_title(10))
+        lbl_title.setStyleSheet(f"color: {T.TXT_TITLE}; background: transparent;")
+
+        btn_style = f"""
+            QPushButton {{
+                background-color: {T.BG_INSET};
+                color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER};
+                border-radius: 0px;
+                padding: 4px 8px;
+                font-family: "{T.FONT_UI}";
+                font-size: 12px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: {T.BG_HEADER}; color: #ffffff; }}
+            QPushButton:disabled {{ color: #555555; background-color: {T.BG_INSET}; border-color: {T.BORDER_SOFT}; }}
+        """
+
+        self.btn_prev = QPushButton("◄")
+        self.btn_prev.setFont(T.f_title(9))
+        self.btn_prev.setCursor(Qt.PointingHandCursor)
+        self.btn_prev.setStyleSheet(btn_style)
+        self.btn_prev.setToolTip("Volta anterior")
+
+        self.combo = QComboBox()
+        self.combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {T.BG_INSET};
+                color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER};
+                border-radius: 0px;
+                padding: 4px 10px;
+                font-family: "{T.FONT_UI}";
+                font-size: 14px;
+            }}
+            QComboBox:hover {{ border: 1px solid #3d454c; }}
+            QComboBox::drop-down {{ border: none; width: 16px; }}
+            QComboBox QAbstractItemView {{
+                background-color: {T.BG_PANEL};
+                color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER};
+                selection-background-color: {T.BG_HEADER};
+                font-family: "{T.FONT_UI}";
+                font-size: 14px;
+                outline: none;
+            }}
+        """)
+        self.combo.addItem("Volta Atual (Ao Vivo)")
+
+        self.btn_next = QPushButton("►")
+        self.btn_next.setFont(T.f_title(9))
+        self.btn_next.setCursor(Qt.PointingHandCursor)
+        self.btn_next.setStyleSheet(btn_style)
+        self.btn_next.setToolTip("Próxima volta")
+
+        self.btn_prev.clicked.connect(self._on_prev_clicked)
+        self.btn_next.clicked.connect(self._on_next_clicked)
+        self.combo.currentIndexChanged.connect(self._update_nav_buttons)
+
+        layout.addWidget(lbl_title, alignment=Qt.AlignVCenter)
+        layout.addWidget(self.btn_prev, alignment=Qt.AlignVCenter)
+        layout.addWidget(self.combo, alignment=Qt.AlignVCenter)
+        layout.addWidget(self.btn_next, alignment=Qt.AlignVCenter)
+
+        self._update_nav_buttons()
+
+    def _on_prev_clicked(self):
+        idx = self.combo.currentIndex()
+        if idx > 0:
+            self.combo.setCurrentIndex(idx - 1)
+
+    def _on_next_clicked(self):
+        idx = self.combo.currentIndex()
+        if idx < self.combo.count() - 1:
+            self.combo.setCurrentIndex(idx + 1)
+
+    def _update_nav_buttons(self):
+        idx = self.combo.currentIndex()
+        count = self.combo.count()
+        self.btn_prev.setEnabled(idx > 0)
+        self.btn_next.setEnabled(idx < count - 1)
+
+
 # --- Main Area Components ---
+
 
 class TopMetricCard(BaseCard):
     """Cartão de métrica do topo (volta atual, melhor volta, delta)."""

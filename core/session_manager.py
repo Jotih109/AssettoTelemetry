@@ -66,6 +66,7 @@ class SessionManager:
             os.makedirs(self.data_dir)
             
         self.historic_laps = []
+        self.completed_laps = []
         self.reset_current_lap()
         
         self.best_lap_ghost = self._empty_ghost()
@@ -390,6 +391,13 @@ class SessionManager:
             "s3": ms_to_str(self.current_sector_times[2]),
             "total_time": lap_time_str
         })
+
+        self.completed_laps.append({
+            "lap_number": getattr(state, "lap_number", len(self.completed_laps) + 1),
+            "lap_time_str": lap_time_str,
+            "metadata": copy.deepcopy(data_to_save["metadata"]),
+            "telemetry": copy.deepcopy(data_to_save["telemetry"])
+        })
         
         # Salva o Session Best na memória
         def lap_time_to_ms(lap_str):
@@ -452,5 +460,25 @@ class SessionManager:
             loaded = True
         else:
             self.ideal_lap_ghost = self._empty_ghost()
-            
+
+        if os.path.exists(folder_path):
+            saved_files = sorted([f for f in os.listdir(folder_path) if f.endswith(".json") and f not in ("best_lap_ghost.json", "ideal_lap_ghost.json")])
+            for fname in saved_files:
+                fpath = os.path.join(folder_path, fname)
+                ldata = _read_json_safe(fpath)
+                if ldata and "telemetry" in ldata and len(ldata["telemetry"].get("times", [])) > 0:
+                    meta = ldata.get("metadata", {})
+                    lap_t_str = meta.get("lap_time_str", "--:--.---")
+                    already_present = any(
+                        c.get("lap_time_str") == lap_t_str and c.get("telemetry", {}).get("times") == ldata["telemetry"].get("times")
+                        for c in self.completed_laps
+                    )
+                    if not already_present:
+                        self.completed_laps.append({
+                            "lap_number": len(self.completed_laps) + 1,
+                            "lap_time_str": lap_t_str,
+                            "metadata": meta,
+                            "telemetry": ldata["telemetry"]
+                        })
+
         return loaded

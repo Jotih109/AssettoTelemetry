@@ -15,7 +15,7 @@ from core.session_manager import SessionManager
 from ui import theme as T
 from ui.sidebar_panel import SidebarPanel
 from ui.components import (
-    TopMetricCard, SectorsCard, CustomPlot, LapHistoryTable, GhostSelectorCard,
+    TopMetricCard, SectorsCard, CustomPlot, LapHistoryTable, GhostSelectorCard, LapSelectorCard,
     GForceCard, WeatherCard, SessionCard, AssistsCard, BrakesCard, TireCard,
 )
 
@@ -149,6 +149,11 @@ class DashboardMainWindow(QMainWindow):
         graph_header_row.addWidget(self.lbl_graph_legend, alignment=Qt.AlignVCenter)
         graph_header_row.addStretch()
         
+        self.lap_selector = LapSelectorCard()
+        self.lap_selector.combo.currentIndexChanged.connect(self.on_selected_lap_changed)
+        graph_header_row.addWidget(self.lap_selector, alignment=Qt.AlignVCenter)
+        graph_header_row.addSpacing(15)
+
         self.ghost_selector = GhostSelectorCard()
         graph_header_row.addWidget(self.ghost_selector, alignment=Qt.AlignVCenter)
         graph_header_row.addSpacing(15)
@@ -493,6 +498,117 @@ class DashboardMainWindow(QMainWindow):
         self.is_live = True
         self.btn_live_state.setText("[ 🔴 AO VIVO ]")
         self.btn_live_state.setStyleSheet(self.btn_live_state.styleSheet().replace("#eedd82", "#ff3333"))
+        if hasattr(self, 'lap_selector') and self.lap_selector.combo.currentIndex() != 0:
+            self.lap_selector.combo.blockSignals(True)
+            self.lap_selector.combo.setCurrentIndex(0)
+            self.lap_selector.combo.blockSignals(False)
+            self.lap_selector._update_nav_buttons()
+
+    def update_lap_selector_items(self):
+        if not hasattr(self, 'lap_selector'): return
+        completed = self.session_manager.completed_laps
+        target_count = len(completed) + 1
+        if self.lap_selector.combo.count() == target_count:
+            for i, lap in enumerate(completed, start=1):
+                num = lap.get("lap_number", i)
+                t_str = lap.get("lap_time_str", "--:--.---")
+                item_text = f"Volta {num} — {t_str}"
+                if self.lap_selector.combo.itemText(i) != item_text:
+                    self.lap_selector.combo.setItemText(i, item_text)
+            return
+
+        curr_idx = self.lap_selector.combo.currentIndex()
+        self.lap_selector.combo.blockSignals(True)
+        self.lap_selector.combo.clear()
+        self.lap_selector.combo.addItem("Volta Atual (Ao Vivo)")
+
+        for i, lap in enumerate(completed, start=1):
+            num = lap.get("lap_number", i)
+            t_str = lap.get("lap_time_str", "--:--.---")
+            self.lap_selector.combo.addItem(f"Volta {num} — {t_str}")
+
+        if curr_idx < self.lap_selector.combo.count():
+            self.lap_selector.combo.setCurrentIndex(curr_idx)
+        else:
+            self.lap_selector.combo.setCurrentIndex(0)
+
+        self.lap_selector.combo.blockSignals(False)
+        self.lap_selector._update_nav_buttons()
+
+    def on_selected_lap_changed(self, idx: int):
+        if idx == 0:
+            self.set_live_mode()
+            return
+        
+        self.is_live = False
+        completed = self.session_manager.completed_laps
+        if idx - 1 >= len(completed):
+            return
+
+        lap_info = completed[idx - 1]
+        lap_num = lap_info.get("lap_number", idx)
+        self.btn_live_state.setText(f"[ 📊 VOLTA {lap_num} ]")
+        self.btn_live_state.setStyleSheet(self.btn_live_state.styleSheet().replace("#ff3333", "#eedd82"))
+
+        self.render_selected_lap(lap_info)
+
+    def render_selected_lap(self, lap_info: dict):
+        telemetry = lap_info.get("telemetry", {})
+        times = telemetry.get("times", [])
+        if not times:
+            return
+
+        gas_100 = [g * 100.0 for g in telemetry.get("gas", [])]
+        brake_100 = [b * 100.0 for b in telemetry.get("brake", [])]
+
+        ref_idx = self.ghost_selector.combo.currentIndex()
+        ref_ghost = self._reference_ghost_for_index(ref_idx)
+        delta_arr = self._calc_lap_delta(telemetry, ref_ghost)
+
+        self.curve_delta.setData(times, delta_arr)
+        self.curve_speed.setData(times, telemetry.get("speed", []))
+        self.curve_gas.setData(times, gas_100)
+        self.curve_brake.setData(times, brake_100)
+        self.curve_steer.setData(times, telemetry.get("steer", []))
+
+        max_time = max(times) if times else 120.0
+        self.plot_delta.setXRange(0, max_time)
+        self.plot_speed.setXRange(0, max_time)
+        self.plot_pedals.setXRange(0, max_time)
+        self.plot_steer.setXRange(0, max_time)
+
+        self.sidebar_panel.track_map_card.map_widget.set_live_data(
+            telemetry.get("car_x", []), telemetry.get("car_z", []),
+            telemetry.get("gas", []), telemetry.get("brake", [])
+        )
+
+    def _calc_lap_delta(self, lap_telemetry: dict, ref_ghost: dict) -> list:
+        times = lap_telemetry.get("times", [])
+        distances = lap_telemetry.get("distance", [])
+        ref_times = ref_ghost.get("telemetry", {}).get("times", [])
+        ref_distances = ref_ghost.get("telemetry", {}).get("distance", [])
+
+        if not times or not distances or not ref_times or not ref_distances:
+            return [0.0] * len(times)
+
+        import bisect
+        deltas = []
+        for t, d in zip(times, distances):
+            if d <= 0 or t <= 0:
+                deltas.append(0.0)
+                continue
+            idx = bisect.bisect_left(ref_distances, d)
+            if idx == 0:
+                ref_t = ref_times[0]
+            elif idx >= len(ref_distances):
+                ref_t = ref_times[-1]
+            else:
+                d0, d1 = ref_distances[idx-1], ref_distances[idx]
+                t0, t1 = ref_times[idx-1], ref_times[idx]
+                ratio = (d - d0) / (d1 - d0) if d1 != d0 else 0.0
+                ref_t = t0 + ratio * (t1 - t0)
+            deltas.append(round(t - ref_t, 3))
+        return deltas
         
     def on_scrubber_pressed(self):
         self.is_live = False
@@ -757,6 +873,7 @@ class DashboardMainWindow(QMainWindow):
             self.setWindowTitle(f"Telemetry Pro — {state.track_name} | {state.car_name}")
             if self.session_manager.auto_load_ghosts(state):
                 self.on_ghost_mode_changed()
+            self.update_lap_selector_items()
   
         # --- Track position progress bar ---
         track_pos = getattr(state, 'track_position', 0.0)
@@ -789,13 +906,14 @@ class DashboardMainWindow(QMainWindow):
                     )
 
             # --- Graph data ---
-            gas_100 = [g * 100.0 for g in curr["gas"]]
-            brake_100 = [b * 100.0 for b in curr["brake"]]
-            self.curve_delta.setData(curr["times"], curr.get("delta", []))
-            self.curve_speed.setData(curr["times"], curr["speed"])
-            self.curve_gas.setData(curr["times"], gas_100)
-            self.curve_brake.setData(curr["times"], brake_100)
-            self.curve_steer.setData(curr["times"], curr.get("steer", []))
+            if self.is_live:
+                gas_100 = [g * 100.0 for g in curr["gas"]]
+                brake_100 = [b * 100.0 for b in curr["brake"]]
+                self.curve_delta.setData(curr["times"], curr.get("delta", []))
+                self.curve_speed.setData(curr["times"], curr["speed"])
+                self.curve_gas.setData(curr["times"], gas_100)
+                self.curve_brake.setData(curr["times"], brake_100)
+                self.curve_steer.setData(curr["times"], curr.get("steer", []))
 
             # Escala Y dinâmica para velocidade
             if curr["speed"]:
@@ -871,6 +989,7 @@ class DashboardMainWindow(QMainWindow):
         historic_count = len(self.session_manager.historic_laps)
         if getattr(self, '_last_historic_count', -1) != historic_count:
             self._last_historic_count = historic_count
+            self.update_lap_selector_items()
             best_time_ms = 0
             best_row_idx = -1
 
@@ -988,6 +1107,9 @@ class DashboardMainWindow(QMainWindow):
             self.curve_ghost_brake.setData([], [])
             self.curve_ghost_steer.setData([], [])
             self.sidebar_panel.track_map_card.map_widget.set_data([], [], [], [])
+
+        if hasattr(self, 'lap_selector') and self.lap_selector.combo.currentIndex() > 0:
+            self.on_selected_lap_changed(self.lap_selector.combo.currentIndex())
 
     def closeEvent(self, event):
         print("Parando Thread de Telemetria...")

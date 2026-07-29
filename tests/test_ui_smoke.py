@@ -180,6 +180,38 @@ try:
 
     check("scrubber (modo análise) e volta ao modo ao vivo", scrubber)
 
+    def seletor_voltas():
+        win.session_manager.completed_laps.append({
+            "lap_number": 1,
+            "lap_time_str": "1:23.456",
+            "metadata": {"track": "Spa", "car": "Test Car"},
+            "telemetry": {
+                "times": [0.0, 1.0, 2.0],
+                "distance": [0.0, 20.0, 40.0],
+                "speed": [100.0, 120.0, 140.0],
+                "gas": [1.0, 1.0, 0.8],
+                "brake": [0.0, 0.0, 0.0],
+                "steer": [0.0, 5.0, -2.0],
+                "car_x": [10.0, 20.0, 30.0],
+                "car_z": [10.0, 20.0, 30.0]
+            }
+        })
+        win.update_lap_selector_items()
+        app.processEvents()
+
+        assert win.lap_selector.combo.count() == 2
+        win.lap_selector.btn_next.click()
+        app.processEvents()
+        assert win.lap_selector.combo.currentIndex() == 1
+        assert not win.is_live
+
+        win.lap_selector.btn_prev.click()
+        app.processEvents()
+        assert win.lap_selector.combo.currentIndex() == 0
+        assert win.is_live
+
+    check("seletor de voltas e navegação anterior/próxima", seletor_voltas)
+
     def desconectado():
         from core.models import TelemetryState
         win.on_telemetry_update(TelemetryState(is_connected=False))

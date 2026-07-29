@@ -228,8 +228,8 @@ class DashboardMainWindow(QMainWindow):
         # sempre ATRÁS da volta atual — o mesmo esquema de sobreposição do i2.
         def _ghost_pen(hex_color):
             c = QColor(hex_color)
-            c.setAlpha(105)
-            return pg.mkPen(color=c, width=4.0)
+            c.setAlpha(150)
+            return pg.mkPen(color=c, width=2.5, style=Qt.DashLine)
 
         self.curve_ghost_speed = self.plot_speed.plot(pen=_ghost_pen(T.CH_SPEED))
         self.curve_ghost_gas = self.plot_pedals.plot(pen=_ghost_pen(T.CH_THROTTLE))
@@ -314,15 +314,13 @@ class DashboardMainWindow(QMainWindow):
         
         # --- Faixa inferior: histórico de voltas + painéis de análise -------
         self.lap_history_table = LapHistoryTable()
-        self.lap_history_table.setFixedHeight(110)
         self.lap_history_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.lap_history_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.lap_history_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         main_layout.addLayout(top_split, stretch=1)
 
         history_panel = T.Panel(title="Histórico de voltas", body_margins=(0, 0, 0, 0))
         history_panel.body.addWidget(self.lap_history_table)
-        history_panel.body.addStretch()
         history_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.lap_history_table.setStyleSheet(
             self.lap_history_table.styleSheet().replace(
@@ -536,7 +534,13 @@ class DashboardMainWindow(QMainWindow):
         self.cursor_steer.setValue(target_time)
         
         if i < len(x_arr) and i < len(z_arr):
-            self.sidebar_panel.track_map_card.map_widget.set_marker(x_arr[i], z_arr[i])
+            gas_val = lap_data.get("gas", [])[i] if i < len(lap_data.get("gas", [])) else 0.0
+            brake_val = lap_data.get("brake", [])[i] if i < len(lap_data.get("brake", [])) else 0.0
+            self.sidebar_panel.track_map_card.map_widget.set_marker(x_arr[i], z_arr[i], gas_val, brake_val)
+            self.sidebar_panel.track_map_card.map_widget.set_live_data(
+                x_arr[:i+1], z_arr[:i+1],
+                lap_data.get("gas", [])[:i+1], lap_data.get("brake", [])[:i+1]
+            )
 
     def _update_sector_lines(self):
         """Reposition S1/S2 vertical lines using actual sector boundaries from the selected reference ghost."""
@@ -575,10 +579,11 @@ class DashboardMainWindow(QMainWindow):
         """Maps the Ghost Selector combo index to the corresponding stored ghost."""
         if idx == 1:   # Personal Best
             return self.session_manager.best_lap_ghost
-        elif idx == 2 or idx == 0:  # Session Record or Desativado (calculates deltas based on session best)
+        elif idx == 2:  # Session Record
             return self.session_manager.session_best_lap_ghost
         elif idx == 3:  # Ideal Lap
             return self.session_manager.ideal_lap_ghost
+        return self.session_manager._empty_ghost()
         return self.session_manager._empty_ghost()
 
     def on_telemetry_update(self, state: TelemetryState):
@@ -665,7 +670,7 @@ class DashboardMainWindow(QMainWindow):
                 self.session_manager.best_lap_ghost["metadata"].get("lap_time_str", "")
                 or best_time_str
             )
-        elif idx == 2 or idx == 0: # Session Record ou Desativado
+        elif idx == 2: # Session Record
             ref_lap_str = self.session_manager.session_best_lap_ghost["metadata"].get("lap_time_str", "--:--.---") or "--:--.---"
         elif idx == 3: # Ideal Lap
             ref_lap_str = self.session_manager.ideal_lap_ghost["metadata"].get("lap_time_str", "--:--.---") or "--:--.---"
@@ -747,6 +752,7 @@ class DashboardMainWindow(QMainWindow):
         signature = f"{state.track_name}_{state.car_name}"
         if signature != self.last_track_car_signature and signature != "Unknown Track_Unknown Car":
             self.last_track_car_signature = signature
+            self._session_max_speed = 0.0
             # Atualiza título da janela com pista e carro
             self.setWindowTitle(f"Telemetry Pro — {state.track_name} | {state.car_name}")
             if self.session_manager.auto_load_ghosts(state):
@@ -774,13 +780,13 @@ class DashboardMainWindow(QMainWindow):
                 self.cursor_steer.setValue(current_time_sec)
 
                 if len(curr.get("car_x", [])) > 0 and len(curr.get("car_z", [])) > 0:
-                    self.sidebar_panel.track_map_card.map_widget.set_marker(curr["car_x"][-1], curr["car_z"][-1])
-                    
-                    if self.ghost_selector.combo.currentIndex() == 0:
-                        self.sidebar_panel.track_map_card.map_widget.set_data(
-                            curr.get("car_x", []), curr.get("car_z", []),
-                            curr.get("gas", []), curr.get("brake", [])
-                        )
+                    gas_val = curr.get("gas", [0.0])[-1] if curr.get("gas") else 0.0
+                    brake_val = curr.get("brake", [0.0])[-1] if curr.get("brake") else 0.0
+                    self.sidebar_panel.track_map_card.map_widget.set_marker(curr["car_x"][-1], curr["car_z"][-1], gas_val, brake_val)
+                    self.sidebar_panel.track_map_card.map_widget.set_live_data(
+                        curr.get("car_x", []), curr.get("car_z", []),
+                        curr.get("gas", []), curr.get("brake", [])
+                    )
 
             # --- Graph data ---
             gas_100 = [g * 100.0 for g in curr["gas"]]
@@ -793,7 +799,8 @@ class DashboardMainWindow(QMainWindow):
 
             # Escala Y dinâmica para velocidade
             if curr["speed"]:
-                max_speed = max(curr["speed"])
+                self._session_max_speed = max(getattr(self, '_session_max_speed', 0.0), max(curr["speed"]))
+                max_speed = self._session_max_speed
                 # Adiciona 20 km/h de margem e arredonda para o próximo múltiplo de 20
                 # (se o valor já for múltiplo exato de 50, usa 50; caso contrário, 20)
                 target_y = max_speed + 20
@@ -823,7 +830,6 @@ class DashboardMainWindow(QMainWindow):
     def _update_live_lap_history(self, state: TelemetryState):
         from PyQt5.QtWidgets import QTableWidgetItem
         from PyQt5.QtCore import Qt
-        from PyQt5.QtGui import QColor
         
         def format_ms(ms):
             if ms <= 0: return "--:--.---"
@@ -839,15 +845,16 @@ class DashboardMainWindow(QMainWindow):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignCenter)
                 self.lap_history_table.setItem(row, col, item)
-            else:
+            elif item.text() != text:
                 item.setText(text)
 
         def ensure_row(lap_num):
             """Return (row_idx, is_new) for the given lap number."""
-            for i in range(self.lap_history_table.rowCount()):
-                item = self.lap_history_table.item(i, 0)
-                if item and item.text() == str(lap_num):
-                    return i, False
+            if not hasattr(self, '_lap_row_map'):
+                self._lap_row_map = {}
+            if lap_num in self._lap_row_map:
+                return self._lap_row_map[lap_num], False
+            
             row_idx = self.lap_history_table.rowCount()
             self.lap_history_table.insertRow(row_idx)
             num_item = QTableWidgetItem(str(lap_num))
@@ -857,55 +864,51 @@ class DashboardMainWindow(QMainWindow):
                 ph = QTableWidgetItem("--:--.---" if col < 5 else "")
                 ph.setTextAlignment(Qt.AlignCenter)
                 self.lap_history_table.setItem(row_idx, col, ph)
+            self._lap_row_map[lap_num] = row_idx
             return row_idx, True
 
-        # Calcular o melhor tempo de volta para highlight
-        best_time_ms = 0
-        best_row_idx = -1
+        # --- 1. Re-sync completed laps ONLY when historic_laps changes ---
+        historic_count = len(self.session_manager.historic_laps)
+        if getattr(self, '_last_historic_count', -1) != historic_count:
+            self._last_historic_count = historic_count
+            best_time_ms = 0
+            best_row_idx = -1
 
-        # --- 1. Sync all COMPLETED laps from historic_laps (frozen data) ---
-        for lap_data in self.session_manager.historic_laps:
-            lap_num = lap_data.get("lap_number", 0)
-            if lap_num <= 0:
-                continue
-            row_idx, _ = ensure_row(lap_num)
-            set_cell(row_idx, 1, lap_data.get("s1", "--:--.---"))
-            set_cell(row_idx, 2, lap_data.get("s2", "--:--.---"))
-            set_cell(row_idx, 3, lap_data.get("s3", "--:--.---"))
-            total_str = lap_data.get("total_time", "--:--.---")
-            set_cell(row_idx, 4, total_str)
-            # Calcular delta vs best
-            lap_ms = self._parse_time_ms(total_str)
-            if lap_ms > 0:
-                if best_time_ms == 0 or lap_ms < best_time_ms:
-                    best_time_ms = lap_ms
-                    best_row_idx = row_idx
-
-        # Preencher coluna de delta para todas as voltas completadas
-        if best_time_ms > 0:
             for lap_data in self.session_manager.historic_laps:
                 lap_num = lap_data.get("lap_number", 0)
                 if lap_num <= 0:
                     continue
                 row_idx, _ = ensure_row(lap_num)
+                set_cell(row_idx, 1, lap_data.get("s1", "--:--.---"))
+                set_cell(row_idx, 2, lap_data.get("s2", "--:--.---"))
+                set_cell(row_idx, 3, lap_data.get("s3", "--:--.---"))
                 total_str = lap_data.get("total_time", "--:--.---")
+                set_cell(row_idx, 4, total_str)
                 lap_ms = self._parse_time_ms(total_str)
                 if lap_ms > 0:
-                    delta_ms = lap_ms - best_time_ms
-                    if delta_ms == 0:
-                        delta_str = "BEST"
-                    else:
-                        delta_s = delta_ms / 1000.0
-                        delta_str = f"+{delta_s:.3f}s"
-                    set_cell(row_idx, 5, delta_str)
+                    if best_time_ms == 0 or lap_ms < best_time_ms:
+                        best_time_ms = lap_ms
+                        best_row_idx = row_idx
 
-        # Highlight best row
-        prev_best = self.lap_history_table._best_row
-        if best_row_idx != prev_best:
-            self.lap_history_table.highlight_best_lap(best_row_idx, prev_best)
-            self.lap_history_table._best_row = best_row_idx
+            if best_time_ms > 0:
+                for lap_data in self.session_manager.historic_laps:
+                    lap_num = lap_data.get("lap_number", 0)
+                    if lap_num <= 0:
+                        continue
+                    row_idx, _ = ensure_row(lap_num)
+                    total_str = lap_data.get("total_time", "--:--.---")
+                    lap_ms = self._parse_time_ms(total_str)
+                    if lap_ms > 0:
+                        delta_ms = lap_ms - best_time_ms
+                        delta_str = "BEST" if delta_ms == 0 else f"+{delta_ms/1000.0:.3f}s"
+                        set_cell(row_idx, 5, delta_str)
 
-        # --- 2. Active lap row: show live sectors ---
+            prev_best = self.lap_history_table._best_row
+            if best_row_idx != prev_best:
+                self.lap_history_table.highlight_best_lap(best_row_idx, prev_best)
+                self.lap_history_table._best_row = best_row_idx
+
+        # --- 2. Active lap row: update current sector times ---
         lap_number = state.lap_number
         if lap_number > 0:
             row_idx, _ = ensure_row(lap_number)
@@ -913,7 +916,6 @@ class DashboardMainWindow(QMainWindow):
             s1 = format_ms(sm.current_sector_times[0])
             s2 = format_ms(sm.current_sector_times[1])
             s3 = format_ms(sm.current_sector_times[2])
-            # Only update cells that are still blank (don't overwrite completed data)
             if sm.current_sector_times[0] > 0:
                 set_cell(row_idx, 1, s1)
             if sm.current_sector_times[1] > 0:
@@ -921,7 +923,9 @@ class DashboardMainWindow(QMainWindow):
             if sm.current_sector_times[2] > 0:
                 set_cell(row_idx, 3, s3)
 
-        self.lap_history_table.scrollToBottom()
+        if getattr(self, '_last_scrolled_lap', -1) != lap_number:
+            self.lap_history_table.scrollToBottom()
+            self._last_scrolled_lap = lap_number
 
     def add_lap_to_history(self, lap_data: dict):
         # Historic data is managed by _update_live_lap_history via session_manager.historic_laps
@@ -937,7 +941,7 @@ class DashboardMainWindow(QMainWindow):
             self.curve_ghost_brake.setData([], [])
             self.curve_ghost_steer.setData([], [])
             
-            lap = self.session_manager.current_lap_data
+            lap = self.session_manager.session_best_lap_ghost.get("telemetry", {})
             self.sidebar_panel.track_map_card.map_widget.set_data(
                 lap.get("car_x", []), lap.get("car_z", []), 
                 lap.get("gas", []), lap.get("brake", [])

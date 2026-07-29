@@ -184,7 +184,7 @@ class PedalsBarCard(QFrame):
 
     def _cap_label(self, text, color):
         lbl = QLabel(text)
-        lbl.setFont(T.f_title(7))
+        lbl.setFont(T.f_title(5))
         lbl.setAlignment(Qt.AlignCenter)
         lbl.setFixedWidth(self.BAR_W)
         lbl.setStyleSheet(f"color: {color}; background: transparent; border: none;")
@@ -224,7 +224,7 @@ class RpmCard(QFrame):
 
         top = QHBoxLayout()
         top.setSpacing(4)
-        lbl_cap = QLabel("ENGINE RPM")
+        lbl_cap = QLabel("RPM")
         lbl_cap.setFont(T.f_title(7))
         lbl_cap.setStyleSheet(f"color: {T.TXT_TITLE}; background: transparent; border: none;")
         self.lbl_rpm = QLabel("0")
@@ -363,7 +363,7 @@ class TireCard(BaseCard):
         frame = QFrame()
         frame.setStyleSheet(T.inset_qss())
         vbox = QVBoxLayout(frame)
-        vbox.setContentsMargins(8, 8, 8, 8)
+        vbox.setContentsMargins(5, 5, 5, 5)
         vbox.setSpacing(1)
 
         head = QHBoxLayout()
@@ -372,7 +372,7 @@ class TireCard(BaseCard):
         lbl_title.setFont(T.f_title(7))
         lbl_title.setStyleSheet(f"color: {T.TXT_TITLE}; background: transparent; border: none;")
         lbl_temp = QLabel("--")
-        lbl_temp.setFont(QFont(T.FONT_MONO, 14, QFont.Bold))
+        lbl_temp.setFont(QFont(T.FONT_MONO, 10, QFont.Bold))
         lbl_temp.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         lbl_temp.setStyleSheet(f"color: {T.TXT_VALUE}; background: transparent; border: none;")
         lbl_deg = QLabel("°C")
@@ -399,10 +399,10 @@ class TireCard(BaseCard):
         row_psi = QHBoxLayout()
         row_psi.setSpacing(4)
         lbl_psi = QLabel("-- psi")
-        lbl_psi.setFont(QFont(T.FONT_MONO, 8))
+        lbl_psi.setFont(QFont(T.FONT_MONO, 7))
         lbl_psi.setStyleSheet(f"color: {T.TXT_LABEL}; background: transparent; border: none;")
         lbl_wear = QLabel("--%")
-        lbl_wear.setFont(QFont(T.FONT_MONO, 8))
+        lbl_wear.setFont(QFont(T.FONT_MONO, 7))
         lbl_wear.setAlignment(Qt.AlignRight)
         lbl_wear.setStyleSheet(f"color: {T.TXT_LABEL}; background: transparent; border: none;")
         row_psi.addWidget(lbl_psi)
@@ -472,10 +472,10 @@ class AssistLED(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self.pill = QLabel(label)
-        self.pill.setFont(QFont(T.FONT_MONO, 11, QFont.Bold))
+        self.pill.setFont(QFont(T.FONT_MONO, 13, QFont.Bold))
         self.pill.setAlignment(Qt.AlignCenter)
-        self.pill.setFixedHeight(26)
-        self.pill.setMinimumWidth(50)
+        self.pill.setFixedHeight(34)
+        self.pill.setMinimumWidth(60)
         self._set_inactive()
         layout.addWidget(self.pill)
 
@@ -526,7 +526,7 @@ class AssistsCard(BaseCard):
         self.body.addWidget(self.bar_abs)
         self.body.addWidget(self.bar_tc)
 
-        self.row_ffb, self.lbl_ffb_v = T.channel_row("FFB", "0", "%")
+        self.row_ffb, self.lbl_ffb_v = T.channel_row("FFB", "0", "%", value_size=13, label_size=10)
         self.body.addWidget(self.row_ffb)
         # Alias antigo
         self.lbl_ffb = self.lbl_ffb_v
@@ -722,12 +722,12 @@ class WeatherCard(BaseCard):
     o que o jogo realmente entrega e afeta o ritmo: aderência da pista e vento.
     """
     def __init__(self):
-        super(WeatherCard, self).__init__(title="Pista")
+        super(WeatherCard, self).__init__(title="Pista", spacing=6)
 
-        self.row_amb, self.lbl_amb_v = T.channel_row("Ar", "--", "°C", value_size=10, label_size=10)
-        self.row_trk, self.lbl_trk_v = T.channel_row("Asfalto", "--", "°C", value_size=10, label_size=10)
-        self.row_grip, self.lbl_grip_v = T.channel_row("Grip", "--", "%", value_size=10, label_size=10)
-        self.row_wind, self.lbl_wind_v = T.channel_row("Vento", "--", "km/h", value_size=10, label_size=10)
+        self.row_amb, self.lbl_amb_v = T.channel_row("Ar", "--", "°C", value_size=11, label_size=10)
+        self.row_trk, self.lbl_trk_v = T.channel_row("Asfalto", "--", "°C", value_size=11, label_size=10)
+        self.row_grip, self.lbl_grip_v = T.channel_row("Grip", "--", "%", value_size=11, label_size=10)
+        self.row_wind, self.lbl_wind_v = T.channel_row("Vento", "--", "km/h", value_size=11, label_size=10)
         for row in (self.row_amb, self.row_trk, self.row_grip, self.row_wind):
             self.body.addWidget(row)
 
@@ -835,7 +835,7 @@ class SteeringWheelWidget(QWidget):
 class SteeringWheelCard(BaseCard):
     """Cartão que contém o visualizador do volante e seu valor."""
     def __init__(self):
-        super(SteeringWheelCard, self).__init__(title="Volante", margins=(0, 5, 0, 5))
+        super(SteeringWheelCard, self).__init__(title="", margins=(0, 5, 0, 5))
         
         self.wheel_widget = SteeringWheelWidget()
         self.wheel_widget.setFixedSize(80, 80)
@@ -862,13 +862,13 @@ class SteeringWheelCard(BaseCard):
 class SessionCard(BaseCard):
     """Tipo de sessão, posição, voltas, tempo restante, composto e danos."""
     def __init__(self):
-        super(SessionCard, self).__init__(title="Sessão")
+        super(SessionCard, self).__init__(title="Sessão", spacing=6)
 
-        self.row_pos, self.lbl_pos_v = T.channel_row("Posição", "--", "", value_size=10, label_size=10)
-        self.row_laps, self.lbl_laps_v = T.channel_row("Volta", "--", "", value_size=10, label_size=10)
-        self.row_left, self.lbl_left_v = T.channel_row("Restante", "--", "", value_size=10, label_size=10)
-        self.row_comp, self.lbl_comp_v = T.channel_row("Composto", "--", "", value_size=10, label_size=10)
-        self.row_dmg, self.lbl_dmg_v = T.channel_row("Danos", "0", "%", value_size=10, label_size=10)
+        self.row_pos, self.lbl_pos_v = T.channel_row("Posição", "--", "", value_size=11, label_size=10)
+        self.row_laps, self.lbl_laps_v = T.channel_row("Volta", "--", "", value_size=11, label_size=10)
+        self.row_left, self.lbl_left_v = T.channel_row("Restante", "--", "", value_size=11, label_size=10)
+        self.row_comp, self.lbl_comp_v = T.channel_row("Composto", "--", "", value_size=11, label_size=10)
+        self.row_dmg, self.lbl_dmg_v = T.channel_row("Danos", "0", "%", value_size=11, label_size=10)
         for row in (self.row_pos, self.row_laps, self.row_left,
                     self.row_comp, self.row_dmg):
             self.body.addWidget(row)
@@ -937,7 +937,7 @@ class BrakesCard(BaseCard):
         grid.addWidget(self.b_rr, 1, 1)
         self.body.addLayout(grid)
 
-        self.row_bias, self.lbl_bias_v = T.channel_row("Bias diant", "--", "%")
+        self.row_bias, self.lbl_bias_v = T.channel_row("Brake Bias", "--", "%", value_size=14, label_size=11)
         self.body.addWidget(self.row_bias)
         self.body.addStretch()
         # Alias antigo
@@ -1031,7 +1031,6 @@ class GForceCard(BaseCard):
                          (self.row_peak, self.lbl_peak_v)):
             lbl.setMinimumWidth(45)
             lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            row.layout().setAlignment(Qt.AlignRight)
         
         self.body.addWidget(self.row_lat)
         self.body.addWidget(self.row_lon)
@@ -1153,7 +1152,7 @@ class CustomPlot(pg.PlotWidget):
 
         self._unit = unit
         self.setBackground(T.BG_PANEL)
-        self.showGrid(x=True, y=True, alpha=0.28)
+        self.showGrid(x=False, y=True, alpha=0.20)
         self.setMouseEnabled(x=False, y=False)
         self.hideButtons()
         self.setMenuEnabled(False)
@@ -1240,7 +1239,8 @@ class LapHistoryTable(QTableWidget):
         self.horizontalHeader().setStretchLastSection(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.verticalHeader().setVisible(False)
-        self.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.verticalHeader().setDefaultSectionSize(24)
         self.setEditTriggers(QTableWidget.NoEditTriggers)
         self.setSelectionMode(QTableWidget.NoSelection)
         self.setShowGrid(True)
@@ -1263,38 +1263,53 @@ class LapHistoryTable(QTableWidget):
 class TrackMapWidget(QWidget):
     def __init__(self):
         super(TrackMapWidget, self).__init__()
-        self._x = []
-        self._z = []
-        self._gas = []
-        self._brake = []
+        self._bg_x = []
+        self._bg_z = []
+        self._live_x = []
+        self._live_z = []
+        self._live_gas = []
+        self._live_brake = []
         self._marker_x = None
         self._marker_z = None
+        self._marker_gas = 0.0
+        self._marker_brake = 0.0
         
-    def set_data(self, x, z, gas, brake):
-        # Ghosts antigos podem não ter car_x/car_z, ou vir com tamanhos
-        # diferentes: cortamos no menor par válido para o traçado nunca
-        # indexar fora do array.
+    def set_data(self, x, z, gas=None, brake=None):
+        """Define o traçado fixo de fundo (layout em cinza)."""
         n = min(len(x or []), len(z or []))
-        self._x = list(x[:n]) if n else []
-        self._z = list(z[:n]) if n else []
-        self._gas = gas or []
-        self._brake = brake or []
+        self._bg_x = list(x[:n]) if n else []
+        self._bg_z = list(z[:n]) if n else []
+        self.update()
+
+    def set_live_data(self, x, z, gas, brake):
+        """Define o traçado ao vivo da volta atual (colorido)."""
+        n = min(len(x or []), len(z or []), len(gas or []), len(brake or []))
+        self._live_x = list(x[:n]) if n else []
+        self._live_z = list(z[:n]) if n else []
+        self._live_gas = list(gas[:n]) if n else []
+        self._live_brake = list(brake[:n]) if n else []
         self.update()
         
-    def set_marker(self, x, z):
+    def set_marker(self, x, z, gas=0.0, brake=0.0):
         self._marker_x = x
         self._marker_z = z
+        self._marker_gas = gas
+        self._marker_brake = brake
         self.update()
         
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         
-        if not self._x or len(self._x) < 2:
+        # Pega todos os pontos disponíveis para definir o enquadramento (bounding box) do mapa
+        ref_x = self._bg_x if len(self._bg_x) >= 2 else self._live_x
+        ref_z = self._bg_z if len(self._bg_z) >= 2 else self._live_z
+        
+        if not ref_x or len(ref_x) < 2:
             return
             
-        min_x, max_x = min(self._x), max(self._x)
-        min_z, max_z = min(self._z), max(self._z)
+        min_x, max_x = min(ref_x), max(ref_x)
+        min_z, max_z = min(ref_z), max(ref_z)
         
         w, h = self.width(), self.height()
         range_x = max(1.0, max_x - min_x)
@@ -1314,28 +1329,69 @@ class TrackMapWidget(QWidget):
             sy = -(pz - cz) * scale + h / 2
             return QPointF(sx, sy)
             
-        for i in range(len(self._x) - 1):
-            p1 = to_screen(self._x[i], self._z[i])
-            p2 = to_screen(self._x[i+1], self._z[i+1])
-            
-            g = self._gas[i] if i < len(self._gas) else 0.0
-            b = self._brake[i] if i < len(self._brake) else 0.0
-            
-            if b > 0.1:
-                color = QColor(T.CH_BRAKE)
-            elif g > 0.1:
-                color = QColor(T.CH_THROTTLE)
-            else:
-                color = QColor("#FFEA00")
-                
-            pen = QPen(color, 2.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-            painter.setPen(pen)
-            painter.drawLine(p1, p2)
-            
+        # 1. Desenha o mapa de fundo (cinza fixo) via QPolygonF de alta performance
+        pts_source_x = self._bg_x if (self._bg_x and len(self._bg_x) >= 2) else self._live_x
+        pts_source_z = self._bg_z if (self._bg_x and len(self._bg_x) >= 2) else self._live_z
+        if pts_source_x and len(pts_source_x) >= 2:
+            poly_bg = QPolygonF([to_screen(px, pz) for px, pz in zip(pts_source_x, pts_source_z)])
+            pen_bg = QPen(QColor("#555555"), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            painter.setPen(pen_bg)
+            painter.drawPolyline(poly_bg)
+
+        # 2. Desenha a linha ao vivo colorida agrupando segmentos contínuos da mesma cor
+        if self._live_x and len(self._live_x) >= 2:
+            n_live = len(self._live_x)
+            current_color = None
+            current_poly = QPolygonF()
+
+            for i in range(n_live):
+                p = to_screen(self._live_x[i], self._live_z[i])
+                g = self._live_gas[i] if i < len(self._live_gas) else 0.0
+                b = self._live_brake[i] if i < len(self._live_brake) else 0.0
+
+                if b > 0.1:
+                    col = QColor(T.CH_BRAKE)
+                elif g > 0.1:
+                    col = QColor(T.CH_THROTTLE)
+                else:
+                    col = QColor("#FFEA00")
+
+                if col != current_color:
+                    if len(current_poly) >= 2:
+                        pen_live = QPen(current_color, 2.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                        painter.setPen(pen_live)
+                        painter.drawPolyline(current_poly)
+                    last_pt = current_poly.last() if not current_poly.isEmpty() else None
+                    current_poly = QPolygonF()
+                    if last_pt:
+                        current_poly.append(last_pt)
+                    current_color = col
+
+                current_poly.append(p)
+
+            if len(current_poly) >= 2 and current_color is not None:
+                pen_live = QPen(current_color, 2.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                painter.setPen(pen_live)
+                painter.drawPolyline(current_poly)
+
+        # 3. Pontinho do carro
         if self._marker_x is not None and self._marker_z is not None:
             mp = to_screen(self._marker_x, self._marker_z)
+            
+            g = getattr(self, '_marker_gas', 0.0)
+            b = getattr(self, '_marker_brake', 0.0)
+            
+            if b > 0.1:
+                marker_color = QColor(T.CH_BRAKE)
+            elif g > 0.1:
+                marker_color = QColor(T.CH_THROTTLE)
+            elif g <= 0.1 and b <= 0.1:
+                marker_color = QColor("#FFEA00") # Yellow when coasting
+            else:
+                marker_color = QColor("#0000FF") # Blue default
+                
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor("#FFEA00"))
+            painter.setBrush(marker_color)
             painter.drawEllipse(mp, 5, 5)
 
 class TrackMapCard(BaseCard):

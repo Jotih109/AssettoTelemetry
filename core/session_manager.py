@@ -4,6 +4,57 @@ import copy
 from datetime import datetime
 from core.models import TelemetryState
 
+
+# ---------------------------------------------------------------------------
+# Persistência resiliente
+# ---------------------------------------------------------------------------
+
+def _write_json_atomic(path: str, data: dict) -> bool:
+    """
+    Grava JSON de forma atômica: escreve num arquivo temporário e só então
+    substitui o definitivo (os.replace é atômico no Windows e no POSIX).
+
+    Sem isso, fechar o jogo ou o app no meio de uma gravação deixa o arquivo
+    truncado — e um ghost truncado derrubava o dashboard ao entrar na pista.
+    """
+    tmp_path = f"{path}.tmp"
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        return True
+    except OSError as e:
+        print(f"[SessionManager] Falha ao salvar {os.path.basename(path)}: {e}")
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        return False
+
+
+def _read_json_safe(path: str):
+    """
+    Lê um JSON tolerando arquivo corrompido/truncado.
+
+    Retorna None em caso de falha (o chamador decide o fallback) e renomeia
+    o arquivo problemático para *.corrupt, para não tentar lê-lo de novo em
+    cada volta nem perder o material caso você queira investigar.
+    """
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError, UnicodeDecodeError) as e:
+        print(f"[SessionManager] Arquivo inválido, ignorando: {path} ({e})")
+        try:
+            os.replace(path, f"{path}.corrupt")
+        except OSError:
+            pass
+        return None
+
+
 class SessionManager:
     """
     Gerencia a sessão atual, mantendo as arrays da volta atual e da volta ideal (Theoretical Best).
@@ -52,12 +103,29 @@ class SessionManager:
         }
         self.current_sector_times = [0, 0, 0]
 
+    # Nomes que indicam que o bloco estático do jogo ainda não foi lido
+    _UNKNOWN_NAMES = {"", "unknown", "unknowntrack", "unknowncar",
+                      "unknown track", "unknown car"}
+
     def _clean_folder_names(self, track, car):
         invalid_chars = '<>:"/\\|?*'
         for c in invalid_chars:
             track = track.replace(c, '')
             car = car.replace(c, '')
         return track if track else "UnknownTrack", car if car else "UnknownCar"
+
+    def _is_identified(self, track: str, car: str) -> bool:
+        """
+        True apenas quando pista E carro foram realmente identificados.
+
+        Ao entrar na pista existe uma janela de alguns quadros em que o bloco
+        estático do AC ainda não foi lido e o estado vem como "Unknown Track /
+        Unknown Car". Salvar voltas nessa janela cria uma pasta lixo e, pior,
+        faz o dashboard carregar esse ghost como "melhor volta" de qualquer
+        sessão não identificada — misturando carros e pistas diferentes.
+        """
+        return (track.strip().lower() not in self._UNKNOWN_NAMES
+                and car.strip().lower() not in self._UNKNOWN_NAMES)
 
     def process_state(self, state: TelemetryState, reference_ghost: dict = None):
         """
@@ -199,14 +267,17 @@ class SessionManager:
             return
             
         track, car = self._clean_folder_names(state.track_name.strip(), state.car_name.strip())
+        if not self._is_identified(track, car):
+            return
         folder_path = os.path.join(self.data_dir, track, car)
         ideal_path = os.path.join(folder_path, "ideal_lap_ghost.json")
         
         ideal_data = self._empty_ghost()
         if os.path.exists(ideal_path):
-            with open(ideal_path, 'r') as f:
-                ideal_data = json.load(f)
-                
+            loaded = _read_json_safe(ideal_path)
+            if loaded is not None and "metadata" in loaded and "telemetry" in loaded:
+                ideal_data = loaded
+
         ideal_sector_times = ideal_data["metadata"].get("sector_times_ms", [0, 0, 0])
         best_recorded_time = ideal_sector_times[closed_sector]
         
@@ -273,12 +344,15 @@ class SessionManager:
             self.ideal_lap_ghost = ideal_data
             
             os.makedirs(folder_path, exist_ok=True)
-            with open(ideal_path, 'w') as f:
-                json.dump(ideal_data, f)
+            _write_json_atomic(ideal_path, ideal_data)
  
     def save_lap(self, state: TelemetryState, manual=False):
         if len(self.current_lap_data["times"]) == 0: return
         track, car = self._clean_folder_names(state.track_name.strip(), state.car_name.strip())
+        if not self._is_identified(track, car):
+            print("[SessionManager] Volta descartada: pista/carro ainda não identificados "
+                  f"({track} / {car}).")
+            return
         folder_path = os.path.join(self.data_dir, track, car)
         os.makedirs(folder_path, exist_ok=True)
         
@@ -298,8 +372,7 @@ class SessionManager:
             "telemetry": self.current_lap_data
         }
         
-        with open(os.path.join(folder_path, filename), 'w') as f:
-            json.dump(data_to_save, f)
+        _write_json_atomic(os.path.join(folder_path, filename), data_to_save)
             
         def ms_to_str(ms):
             if ms <= 0: return "--:--"
@@ -344,28 +417,29 @@ class SessionManager:
         if state.best_time != self._best_time or manual:
             self._best_time = state.best_time
             self.best_lap_ghost = copy.deepcopy(data_to_save)
-            with open(os.path.join(folder_path, "best_lap_ghost.json"), 'w') as f:
-                json.dump(data_to_save, f)
+            _write_json_atomic(os.path.join(folder_path, "best_lap_ghost.json"), data_to_save)
  
     def auto_load_ghosts(self, state: TelemetryState):
         """ Carrega tanto o Best quanto o Ideal """
         track, car = self._clean_folder_names(state.track_name.strip(), state.car_name.strip())
+        if not self._is_identified(track, car):
+            return False
         folder_path = os.path.join(self.data_dir, track, car)
-        
+
         best_path = os.path.join(folder_path, "best_lap_ghost.json")
         ideal_path = os.path.join(folder_path, "ideal_lap_ghost.json")
         
         loaded = False
-        if os.path.exists(best_path):
-            with open(best_path, 'r') as f:
-                self.best_lap_ghost = json.load(f)
+        best_data = _read_json_safe(best_path) if os.path.exists(best_path) else None
+        if best_data is not None and "telemetry" in best_data:
+            self.best_lap_ghost = best_data
             loaded = True
         else:
             self.best_lap_ghost = self._empty_ghost()
-            
-        if os.path.exists(ideal_path):
-            with open(ideal_path, 'r') as f:
-                self.ideal_lap_ghost = json.load(f)
+
+        ideal_data = _read_json_safe(ideal_path) if os.path.exists(ideal_path) else None
+        if ideal_data is not None and "telemetry" in ideal_data:
+            self.ideal_lap_ghost = ideal_data
             meta = self.ideal_lap_ghost.get("metadata", {})
             if not meta.get("lap_time_str") and "sector_times_ms" in meta:
                 st = meta["sector_times_ms"]

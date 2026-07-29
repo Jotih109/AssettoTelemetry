@@ -14,12 +14,32 @@ se você sair para o menu ou fechar/reabrir o jogo.
 """
 
 import sys
+import traceback
 from PyQt5.QtWidgets import QApplication
 
 from providers.assettocorsa import AssettoCorsaTelemetryProvider
 from providers.mock import MockTelemetryProvider
 from core.engine import TelemetryEngine
 from ui.main_window import DashboardMainWindow
+
+
+def _install_crash_guard():
+    """
+    Rede de segurança contra travamento no meio da sessão.
+
+    O PyQt5 aborta o processo quando uma exceção escapa de um slot — ou seja,
+    um único quadro de telemetria estranho fecharia o dashboard enquanto você
+    está na pista. Com um excepthook próprio, o erro é registrado no console e
+    o app continua rodando.
+    """
+    def hook(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        print("[!] Erro não tratado (o dashboard continua rodando):")
+        traceback.print_exception(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = hook
 
 # --------------------------------------------------------------------------
 # MOCK_MODE
@@ -32,6 +52,7 @@ MOCK_MODE = False
 
 
 def main():
+    _install_crash_guard()
     app = QApplication(sys.argv)
 
     if MOCK_MODE:

@@ -195,7 +195,8 @@ def channel_row(name: str, value: str = "--", unit: str = "",
         lbl_unit = QLabel(unit)
         lbl_unit.setFont(f_label(label_size - 1))
         lbl_unit.setStyleSheet(f"color: {TXT_UNIT}; background: transparent; border: none;")
-        lbl_unit.setFixedWidth(28)
+        # 34 px acomoda a unidade mais larga em uso ("km/h") sem cortar
+        lbl_unit.setFixedWidth(34)
         lay.addWidget(lbl_unit)
 
     row.lbl_value = lbl_val

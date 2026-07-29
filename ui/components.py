@@ -62,17 +62,6 @@ class BaseCard(T.Panel):
         super(BaseCard, self).__init__(title=title, body_margins=margins, spacing=spacing)
 
 
-def _inset(padding=(6, 4, 6, 4)) -> QFrame:
-    """Caixa afundada para destacar um valor."""
-    box = QFrame()
-    box.setStyleSheet(T.inset_qss())
-    lay = QVBoxLayout(box)
-    lay.setContentsMargins(*padding)
-    lay.setSpacing(0)
-    box._lay = lay
-    return box
-
-
 # --- Sidebar Components ---
 
 class GearCard(QFrame):
@@ -345,7 +334,7 @@ class CarDataCard(BaseCard):
             self._set_fuel_bar(color)
             self.lbl_fuel_v.setStyleSheet(
                 f"color: {color}; background: transparent; border: none;")
-            self.row_fuel.lbl_name.setText(f"Combustível ({fuel_capacity:.0f} L)")
+            self.row_fuel.lbl_name.setText(f"Combustível {fuel_capacity:.0f}L")
 
 
 class TireCard(BaseCard):
@@ -537,7 +526,7 @@ class AssistsCard(BaseCard):
         self.body.addWidget(self.bar_abs)
         self.body.addWidget(self.bar_tc)
 
-        self.row_ffb, self.lbl_ffb_v = T.channel_row("Force feedback", "0", "%")
+        self.row_ffb, self.lbl_ffb_v = T.channel_row("FFB", "0", "%")
         self.body.addWidget(self.row_ffb)
         # Alias antigo
         self.lbl_ffb = self.lbl_ffb_v
@@ -574,10 +563,10 @@ class AssistsCard(BaseCard):
         self.lbl_ffb_v.setText(f"{ffb_pct:.0f}")
         if ffb_pct > 95:
             color = T.BAD
-            self.row_ffb.lbl_name.setText("Force feedback  CLIP")
+            self.row_ffb.lbl_name.setText("FFB CLIP")
         else:
             color = T.WARN if ffb_pct > 80 else T.TXT_VALUE
-            self.row_ffb.lbl_name.setText("Force feedback")
+            self.row_ffb.lbl_name.setText("FFB")
         self.lbl_ffb_v.setStyleSheet(f"color: {color}; background: transparent; border: none;")
 
 
@@ -737,7 +726,7 @@ class WeatherCard(BaseCard):
 
         self.row_amb, self.lbl_amb_v = T.channel_row("Ar", "--", "°C", value_size=10, label_size=10)
         self.row_trk, self.lbl_trk_v = T.channel_row("Asfalto", "--", "°C", value_size=10, label_size=10)
-        self.row_grip, self.lbl_grip_v = T.channel_row("Aderência", "--", "%", value_size=10, label_size=10)
+        self.row_grip, self.lbl_grip_v = T.channel_row("Grip", "--", "%", value_size=10, label_size=10)
         self.row_wind, self.lbl_wind_v = T.channel_row("Vento", "--", "km/h", value_size=10, label_size=10)
         for row in (self.row_amb, self.row_trk, self.row_grip, self.row_wind):
             self.body.addWidget(row)
@@ -948,7 +937,7 @@ class BrakesCard(BaseCard):
         grid.addWidget(self.b_rr, 1, 1)
         self.body.addLayout(grid)
 
-        self.row_bias, self.lbl_bias_v = T.channel_row("Bias diant.", "--", "%")
+        self.row_bias, self.lbl_bias_v = T.channel_row("Bias diant", "--", "%")
         self.body.addWidget(self.row_bias)
         self.body.addStretch()
         # Alias antigo
@@ -1032,8 +1021,8 @@ class GForceCard(BaseCard):
         self.canvas = _GForceCanvas(self)
         self.body.addWidget(self.canvas, stretch=1)
 
-        self.row_lat, self.lbl_lat_v = T.channel_row("Lateral", "+0.00", "g")
-        self.row_lon, self.lbl_lon_v = T.channel_row("Longitud.", "+0.00", "g")
+        self.row_lat, self.lbl_lat_v = T.channel_row("Lat", "+0.00", "g")
+        self.row_lon, self.lbl_lon_v = T.channel_row("Lon", "+0.00", "g")
         self.row_peak, self.lbl_peak_v = T.channel_row("Pico", "0.0/0.0", "g")
         
         # Alinhamento e largura mínima para evitar encavalamento com 'g'
@@ -1126,28 +1115,6 @@ class _GForceCanvas(QWidget):
         painter.drawEllipse(int(x - 4), int(y - 4), 9, 9)
 
         painter.end()
-
-
-class LegendsRow(QWidget):
-    def __init__(self):
-        super().__init__()
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        self._add_legend(layout, T.PURPLE, "recorde da sessão")
-        self._add_legend(layout, T.OK, "mais rápido que sua melhor volta")
-        self._add_legend(layout, T.BAD, "mais lento")
-        layout.addStretch()
-
-    def _add_legend(self, layout, color, text):
-        box = QFrame()
-        box.setFixedSize(8, 8)
-        box.setStyleSheet(f"background-color: {color}; border: none;")
-        lbl = QLabel(text)
-        lbl.setFont(T.f_label(8))
-        lbl.setStyleSheet(f"color: {T.TXT_UNIT};")
-        layout.addWidget(box)
-        layout.addWidget(lbl)
-        layout.addSpacing(14)
 
 
 class TimeAxisItem(pg.AxisItem):
@@ -1304,10 +1271,14 @@ class TrackMapWidget(QWidget):
         self._marker_z = None
         
     def set_data(self, x, z, gas, brake):
-        self._x = x
-        self._z = z
-        self._gas = gas
-        self._brake = brake
+        # Ghosts antigos podem não ter car_x/car_z, ou vir com tamanhos
+        # diferentes: cortamos no menor par válido para o traçado nunca
+        # indexar fora do array.
+        n = min(len(x or []), len(z or []))
+        self._x = list(x[:n]) if n else []
+        self._z = list(z[:n]) if n else []
+        self._gas = gas or []
+        self._brake = brake or []
         self.update()
         
     def set_marker(self, x, z):

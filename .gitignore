@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Dados gerados pelo app (ghosts, voltas salvas e exportações)
+telemetry_data/
+telemetry_sessions/
+exportacoes/
+telemetry.json
+*.corrupt
+*.json.tmp
+
+# Editores
+.vscode/
+.idea/
+
+# Logs
+log.txt
+*.log

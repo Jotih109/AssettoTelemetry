@@ -10,8 +10,6 @@
 
 > 💡 **Não é preciso configurar nada no jogo.** O Assetto Corsa publica a telemetria em memória compartilhada automaticamente — basta abrir o AC e entrar na pista. O dashboard conecta e reconecta sozinho.
 
-O provider do **Automobilista 2** (UDP / pCars2) continua no repositório em `providers/automobilista2.py`, caso você queira voltar a usá-lo.
-
 O objetivo é fornecer ao piloto uma ferramenta de análise de desempenho semelhante às usadas em equipes de motorsport real — permitindo comparar voltas, identificar onde o tempo é perdido e acompanhar o estado do carro em tempo real.
 
 ---
@@ -80,15 +78,14 @@ O objetivo é fornecer ao piloto uma ferramenta de análise de desempenho semelh
 
 > Esta seção lista funcionalidades que **ainda não foram implementadas** ou que estão parcialmente prontas.
 
-- [ ] **Mapa da pista** — visualização do traçado com posição do carro em tempo real (`mapa.py` em desenvolvimento)
+- [ ] **Mapa da pista** — o traçado já aparece na sidebar; falta a tela de análise pós-sessão (`mapa.pyw` em desenvolvimento)
 - [ ] **Comparação lado a lado de múltiplas voltas** — sobreposição de mais de 2 voltas nos gráficos
 - [ ] **Tela de análise pós-sessão** — revisão detalhada offline de voltas salvas
 - [ ] **Suporte a múltiplos monitores** — janelas separadas para sidebar e gráficos
 - [ ] **Configurações persistentes** — salvar preferências do usuário (referência padrão, tema, etc.)
 - [ ] **Suporte ao Assetto Corsa Competizione (ACC)** — o ACC usa os mesmos nomes de blocos de memória, mas com structs diferentes; exigiria um provider próprio
 - [ ] **Steer lock por carro** — o AC entrega o volante normalizado (-1 a 1); hoje o ângulo em graus usa uma constante (`STEER_LOCK_DEG`, padrão 240°) ajustável em `providers/assettocorsa.py`
-- [x] ~~**Teste do provider**~~ — `tests/test_assettocorsa_provider.py` simula os blocos de memória do AC e valida os 54 campos lidos (rode com o jogo fechado)
-- [ ] **Testes automatizados** — falta cobertura da UI e do `SessionManager`
+- [x] ~~**Testes automatizados**~~ — 80 verificações em `tests/`: provider (54), persistência (16) e fumaça da UI (10)
 - [ ] **Instalador / Executável** — distribuição como `.exe` para Windows ainda não disponível
 
 ---
@@ -100,25 +97,26 @@ Claudio-main/
 ├── core/
 │   ├── engine.py           # Thread a 60 Hz: captura estado e emite sinal Qt
 │   ├── models.py           # TelemetryState — modelo padronizado de dados
-│   └── session_manager.py  # Lógica de voltas, setores, splicing, ghost e consumo
+│   ├── session_manager.py  # Lógica de voltas, setores, splicing, ghost e consumo
+│   └── storage.py          # Persistência por sessão (usada pelo mapa.pyw)
 ├── providers/
 │   ├── base.py             # Classe base abstrata (interface do provider)
-│   ├── assettocorsa.py     # Provider do AC1 via memória compartilhada  ← em uso
-│   ├── automobilista2.py   # Provider UDP do AMS2 (protocolo pCars2) — legado
+│   ├── assettocorsa.py     # Provider do AC1 via memória compartilhada
 │   └── mock.py             # Simulador interno para testes sem o jogo
 ├── ui/
 │   ├── theme.py            # Paleta, fontes e painéis no estilo MoTeC i2
 │   ├── main_window.py      # Janela principal: gráficos, métricas e histórico
 │   ├── sidebar_panel.py    # Painel lateral com mostradores do carro
-│   ├── bottom_strip.py     # Faixa de análise: força G, freios, pista e pneus
-│   ├── components.py       # Todos os widgets reutilizáveis (Cards, Plots, etc.)
-│   └── mapa.py             # [EM DESENVOLVIMENTO] Visualização do mapa da pista
+│   └── components.py       # Todos os widgets reutilizáveis (Cards, Plots, etc.)
 ├── tests/
-│   └── test_assettocorsa_provider.py  # Simula a memória do AC e valida o provider
+│   ├── test_assettocorsa_provider.py  # Simula a memória do AC e valida o provider
+│   ├── test_session_manager.py        # Persistência: ghosts corrompidos e antigos
+│   └── test_ui_smoke.py               # Monta a janela e exercita os caminhos da UI
 ├── exportacoes/            # Screenshots PNG exportadas automaticamente
 ├── telemetry_data/         # Ghosts e histórico de voltas em JSON (por pista/carro)
 ├── main.pyw                # Ponto de entrada da aplicação
-├── mock_game.py            # Emulador de pacotes UDP (só serve para o AMS2)
+├── mapa.pyw                # [EM DESENVOLVIMENTO] Análise de sessões salvas
+├── mock_game.py            # Escreve na memória compartilhada, simulando o AC
 ├── requirements.txt        # Dependências Python
 ├── reset.bat               # Inicia o dashboard (CMD)
 └── reset.ps1               # Inicia o dashboard (PowerShell)

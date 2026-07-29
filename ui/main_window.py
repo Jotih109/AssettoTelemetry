@@ -1,6 +1,9 @@
 import collections
 import os
-from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout, QPushButton, QSizePolicy, QSplitter, QProgressBar, QSlider
+from PyQt5.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
+    QPushButton, QSizePolicy, QSplitter, QProgressBar, QSlider, QScrollArea,
+)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QColor
 import pyqtgraph as pg
@@ -11,8 +14,10 @@ from core.session_manager import SessionManager
 
 from ui import theme as T
 from ui.sidebar_panel import SidebarPanel
-from ui.bottom_strip import BottomStrip
-from ui.components import TopMetricCard, SectorsCard, LegendsRow, CustomPlot, LapHistoryTable, GhostSelectorCard, GForceCard, WeatherCard, SessionCard, AssistsCard, BrakesCard, TireCard
+from ui.components import (
+    TopMetricCard, SectorsCard, CustomPlot, LapHistoryTable, GhostSelectorCard,
+    GForceCard, WeatherCard, SessionCard, AssistsCard, BrakesCard, TireCard,
+)
 
 # Auto-exporta uma imagem PNG da análise sempre que uma nova Melhor Volta (Best Lap)
 # for concluída. Desligue se preferir só exportar manualmente pelo botão da UI.
@@ -330,9 +335,18 @@ class DashboardMainWindow(QMainWindow):
         self.brakes_card = BrakesCard()
         self.tire_card = TireCard()
 
-        cards = (self.gforce_card, self.weather_card, self.session_card, 
+        # Larguras mínimas por painel: com stretch puro, o histórico era
+        # esmagado a ~300 px e as colunas S3/Tempo/Δ Best ficavam invisíveis,
+        # e a unidade do vento aparecia cortada no painel da pista.
+        # Somam 1484 px com os espaçamentos: cabe inteiro numa janela de 1500 px
+        MIN_W = {
+            "history": 380, "gforce": 150, "weather": 155,
+            "session": 160, "assists": 155, "brakes": 210, "tires": 250,
+        }
+
+        cards = (self.gforce_card, self.weather_card, self.session_card,
                  self.assists_card, self.brakes_card, self.tire_card)
-        
+
         for card in cards:
             card.setStyleSheet(card.styleSheet().replace(f"border: 1px solid {T.BORDER};", "border: none;"))
             card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -343,19 +357,38 @@ class DashboardMainWindow(QMainWindow):
         footer_layout = QHBoxLayout(bottom_row_widget)
         footer_layout.setContentsMargins(0, 0, 0, 0)
         footer_layout.setSpacing(4)
-        
+
+        history_panel.setMinimumWidth(MIN_W["history"])
         footer_layout.addWidget(history_panel, stretch=3)
-        footer_layout.addWidget(self.gforce_card, stretch=2)
-        footer_layout.addWidget(self.weather_card, stretch=2)
-        footer_layout.addWidget(self.session_card, stretch=2)
-        footer_layout.addWidget(self.assists_card, stretch=2)
-        footer_layout.addWidget(self.brakes_card, stretch=2)
-        footer_layout.addWidget(self.tire_card, stretch=2)
+        for key, card in (("gforce", self.gforce_card), ("weather", self.weather_card),
+                          ("session", self.session_card), ("assists", self.assists_card),
+                          ("brakes", self.brakes_card), ("tires", self.tire_card)):
+            card.setMinimumWidth(MIN_W[key])
+            footer_layout.addWidget(card, stretch=1)
         
         bottom_row_widget.setFixedHeight(180)
         bottom_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        main_layout.addWidget(bottom_row_widget, stretch=0)
+        # Somados, os mínimos dos painéis passam de 1500 px. Em telas menores
+        # (1366x768, por exemplo) isso empurraria a janela além do monitor ou
+        # cortaria colunas. Numa faixa rolável na horizontal, nada é cortado:
+        # em tela larga aparece tudo, em tela estreita você arrasta.
+        footer_scroll = QScrollArea()
+        footer_scroll.setWidget(bottom_row_widget)
+        footer_scroll.setWidgetResizable(True)
+        footer_scroll.setFrameShape(QScrollArea.NoFrame)
+        footer_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        footer_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        footer_scroll.setFixedHeight(180 + 12)   # +12 para a barra de rolagem
+        footer_scroll.setStyleSheet(f"""
+            QScrollArea {{ background: {T.BG_APP}; border: none; }}
+            QScrollBar:horizontal {{ background: {T.BG_APP}; height: 8px; margin: 0; }}
+            QScrollBar::handle:horizontal {{ background: {T.BORDER}; min-width: 40px; }}
+            QScrollBar::handle:horizontal:hover {{ background: #3a4249; }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+        """)
+
+        main_layout.addWidget(footer_scroll, stretch=0)
  
     # -----------------------------------------------------------------------
     # Helpers
@@ -919,16 +952,30 @@ class DashboardMainWindow(QMainWindow):
             
         if ghost and len(ghost.get("times", [])) > 0:
             x_data = ghost.get("times", [])
-            ghost_gas_100 = [g * 100.0 for g in ghost.get("gas", [])]
-            ghost_brake_100 = [b * 100.0 for b in ghost.get("brake", [])]
-            ghost_steer = ghost.get("steer", [0] * len(x_data))
-            self.curve_ghost_speed.setData(x_data, ghost["speed"])
-            self.curve_ghost_gas.setData(x_data, ghost_gas_100)
-            self.curve_ghost_brake.setData(x_data, ghost_brake_100)
-            self.curve_ghost_steer.setData(x_data, ghost_steer)
-            
+            n = len(x_data)
+
+            def channel(key, scale=1.0):
+                """
+                Lê um canal do ghost já ajustado ao tamanho do eixo X.
+
+                Ghosts gravados por versões antigas do app não têm todos os
+                canais (car_x/car_z e steer são recentes). O pyqtgraph exige
+                X e Y do mesmo tamanho, então completamos com zeros ou
+                truncamos em vez de deixar estourar.
+                """
+                arr = ghost.get(key) or []
+                arr = [v * scale for v in arr[:n]]
+                if len(arr) < n:
+                    arr += [0.0] * (n - len(arr))
+                return arr
+
+            self.curve_ghost_speed.setData(x_data, channel("speed"))
+            self.curve_ghost_gas.setData(x_data, channel("gas", 100.0))
+            self.curve_ghost_brake.setData(x_data, channel("brake", 100.0))
+            self.curve_ghost_steer.setData(x_data, channel("steer"))
+
             self.sidebar_panel.track_map_card.map_widget.set_data(
-                ghost.get("car_x", []), ghost.get("car_z", []), 
+                ghost.get("car_x", []), ghost.get("car_z", []),
                 ghost.get("gas", []), ghost.get("brake", [])
             )
         else:

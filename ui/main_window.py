@@ -1,6 +1,6 @@
 import collections
 import os
-from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout, QPushButton, QSizePolicy, QSplitter, QProgressBar
+from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout, QPushButton, QSizePolicy, QSplitter, QProgressBar, QSlider
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QColor
 import pyqtgraph as pg
@@ -12,7 +12,7 @@ from core.session_manager import SessionManager
 from ui import theme as T
 from ui.sidebar_panel import SidebarPanel
 from ui.bottom_strip import BottomStrip
-from ui.components import TopMetricCard, SectorsCard, LegendsRow, CustomPlot, LapHistoryTable, GhostSelectorCard
+from ui.components import TopMetricCard, SectorsCard, LegendsRow, CustomPlot, LapHistoryTable, GhostSelectorCard, GForceCard, WeatherCard, SessionCard, AssistsCard, BrakesCard, TireCard
 
 # Auto-exporta uma imagem PNG da análise sempre que uma nova Melhor Volta (Best Lap)
 # for concluída. Desligue se preferir só exportar manualmente pelo botão da UI.
@@ -34,6 +34,7 @@ class DashboardMainWindow(QMainWindow):
         
         self.setWindowTitle("Telemetry Pro - Analysis Tool")
         self.setGeometry(50, 50, 1400, 850)
+        self.setMinimumSize(1280, 720)
 
         self.setStyleSheet(T.app_qss())
         
@@ -62,12 +63,12 @@ class DashboardMainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(2, 2, 2, 2)
+        main_layout.setSpacing(4)
 
         # --- Top Split: Sidebar (Esq) + Main Area (Dir) ---
         top_split = QHBoxLayout()
-        top_split.setSpacing(8)
+        top_split.setSpacing(4)
         
         # Sidebar
         self.sidebar_panel = SidebarPanel()
@@ -75,11 +76,11 @@ class DashboardMainWindow(QMainWindow):
         
         # Main Area (Direita)
         right_area = QVBoxLayout()
-        right_area.setSpacing(6)
+        right_area.setSpacing(4)
 
         # Metrics Row
         metrics_row = QHBoxLayout()
-        metrics_row.setSpacing(8)
+        metrics_row.setSpacing(4)
         
         self.card_current = TopMetricCard("Volta atual", "--:--.---")
         self.card_best = TopMetricCard("Melhor volta", "--:--.---")
@@ -93,12 +94,30 @@ class DashboardMainWindow(QMainWindow):
         
         right_area.addLayout(metrics_row)
         
+        self.is_live = True
+        
+        self.btn_live_state = QPushButton("[ 🔴 AO VIVO ]")
+        self.btn_live_state.setFont(T.f_title(9))
+        self.btn_live_state.setCursor(Qt.PointingHandCursor)
+        self.btn_live_state.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {T.BG_INSET};
+                color: #ff3333;
+                border: 1px solid {T.BORDER};
+                border-radius: 0px;
+                padding: 4px 10px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: {T.BG_HEADER}; }}
+        """)
+        self.btn_live_state.clicked.connect(self.set_live_mode)
+        
         # Barra de ferramentas dos gráficos: legenda | referência | Ref/Est | exportar
         self.lbl_graph_legend = QLabel("──  volta atual        ──  referência")
         self.lbl_graph_legend.setFont(T.f_label(8))
         self.lbl_graph_legend.setStyleSheet(f"color: {T.TXT_UNIT};")
 
-        self.lbl_ref_est_laps = QLabel("Ref --:--.---   Est --:--.---")
+        self.lbl_ref_est_laps = QLabel("Última: --:--.---   Ref: --:--.---   Est: --:--.---")
         self.lbl_ref_est_laps.setFont(QFont(T.FONT_MONO, 11, QFont.Bold))
         self.lbl_ref_est_laps.setStyleSheet(f"color: {T.TXT_LABEL};")
 
@@ -120,6 +139,8 @@ class DashboardMainWindow(QMainWindow):
 
         graph_header_row = QHBoxLayout()
         graph_header_row.setContentsMargins(0, 0, 0, 0)
+        graph_header_row.addWidget(self.btn_live_state, alignment=Qt.AlignVCenter)
+        graph_header_row.addSpacing(15)
         graph_header_row.addWidget(self.lbl_graph_legend, alignment=Qt.AlignVCenter)
         graph_header_row.addStretch()
         
@@ -220,6 +241,17 @@ class DashboardMainWindow(QMainWindow):
         self.plot_splitter.setHandleWidth(2)
         self.plot_splitter.setStyleSheet(
             f"QSplitter::handle {{ background-color: {T.BG_APP}; }}")
+        
+        self.plot_delta.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self.plot_speed.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self.plot_pedals.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self.plot_steer.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+
+        self.plot_delta.setMinimumHeight(50)
+        self.plot_speed.setMinimumHeight(50)
+        self.plot_pedals.setMinimumHeight(50)
+        self.plot_steer.setMinimumHeight(50)
+        
         self.plot_splitter.addWidget(self.plot_delta)
         self.plot_splitter.addWidget(self.plot_speed)
         self.plot_splitter.addWidget(self.plot_pedals)
@@ -238,23 +270,38 @@ class DashboardMainWindow(QMainWindow):
         lbl_pos.setFont(T.f_title(7))
         lbl_pos.setStyleSheet(f"color: {T.TXT_UNIT};")
         lbl_pos.setFixedWidth(CustomPlot.Y_GUTTER)
-        self.track_pos_bar = QProgressBar()
-        self.track_pos_bar.setRange(0, 1000)
-        self.track_pos_bar.setValue(0)
-        self.track_pos_bar.setTextVisible(False)
-        self.track_pos_bar.setFixedHeight(7)
-        self.track_pos_bar.setStyleSheet(f"""
-            QProgressBar {{ background-color: {T.BG_INSET};
-                            border: 1px solid {T.BORDER_SOFT}; border-radius: 0px; }}
-            QProgressBar::chunk {{ background-color: {T.CH_SPEED}; }}
+        self.track_pos_slider = QSlider(Qt.Horizontal)
+        self.track_pos_slider.setRange(0, 1000)
+        self.track_pos_slider.setValue(0)
+        self.track_pos_slider.setFixedHeight(15)
+        self.track_pos_slider.setCursor(Qt.PointingHandCursor)
+        self.track_pos_slider.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                border: 1px solid {T.BORDER_SOFT};
+                height: 7px;
+                background: {T.BG_INSET};
+                margin: 0px 0;
+            }}
+            QSlider::handle:horizontal {{
+                background: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER};
+                width: 15px;
+                margin: -4px 0;
+                border-radius: 2px;
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {T.CH_SPEED};
+            }}
         """)
+        self.track_pos_slider.sliderPressed.connect(self.on_scrubber_pressed)
+        self.track_pos_slider.valueChanged.connect(self.on_scrubber_moved)
         self.lbl_track_pos_pct = QLabel("0.0%")
         self.lbl_track_pos_pct.setFont(QFont(T.FONT_MONO, 8))
         self.lbl_track_pos_pct.setStyleSheet(f"color: {T.TXT_UNIT};")
         self.lbl_track_pos_pct.setFixedWidth(46)
         self.lbl_track_pos_pct.setAlignment(Qt.AlignRight)
         track_pos_row.addWidget(lbl_pos)
-        track_pos_row.addWidget(self.track_pos_bar)
+        track_pos_row.addWidget(self.track_pos_slider)
         track_pos_row.addWidget(self.lbl_track_pos_pct)
         right_area.addLayout(track_pos_row)
         
@@ -262,26 +309,53 @@ class DashboardMainWindow(QMainWindow):
         
         # --- Faixa inferior: histórico de voltas + painéis de análise -------
         self.lap_history_table = LapHistoryTable()
-        self.lap_history_table.setMinimumHeight(100)
-        self.lap_history_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.lap_history_table.setFixedHeight(110)
+        self.lap_history_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.lap_history_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
 
-        main_layout.addLayout(top_split, stretch=6)
+        main_layout.addLayout(top_split, stretch=1)
 
         history_panel = T.Panel(title="Histórico de voltas", body_margins=(0, 0, 0, 0))
         history_panel.body.addWidget(self.lap_history_table)
-        # A tabela já tem a própria borda; dentro do painel ela viraria borda dupla
+        history_panel.body.addStretch()
+        history_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.lap_history_table.setStyleSheet(
             self.lap_history_table.styleSheet().replace(
                 f"border: 1px solid {T.BORDER};", "border: none;"))
+                
+        self.gforce_card = GForceCard()
+        self.weather_card = WeatherCard()
+        self.session_card = SessionCard()
+        self.assists_card = AssistsCard()
+        self.brakes_card = BrakesCard()
+        self.tire_card = TireCard()
 
-        self.bottom_strip = BottomStrip()
+        cards = (self.gforce_card, self.weather_card, self.session_card, 
+                 self.assists_card, self.brakes_card, self.tire_card)
+        
+        for card in cards:
+            card.setStyleSheet(card.styleSheet().replace(f"border: 1px solid {T.BORDER};", "border: none;"))
+            card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            if hasattr(card, 'body'):
+                card.body.setContentsMargins(4, 4, 4, 4)
 
-        bottom_row = QHBoxLayout()
-        bottom_row.setSpacing(8)
-        bottom_row.addWidget(history_panel, stretch=1)
-        bottom_row.addWidget(self.bottom_strip, stretch=0)
+        bottom_row_widget = QWidget()
+        footer_layout = QHBoxLayout(bottom_row_widget)
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.setSpacing(4)
+        
+        footer_layout.addWidget(history_panel, stretch=3)
+        footer_layout.addWidget(self.gforce_card, stretch=2)
+        footer_layout.addWidget(self.weather_card, stretch=2)
+        footer_layout.addWidget(self.session_card, stretch=2)
+        footer_layout.addWidget(self.assists_card, stretch=2)
+        footer_layout.addWidget(self.brakes_card, stretch=2)
+        footer_layout.addWidget(self.tire_card, stretch=2)
+        
+        bottom_row_widget.setFixedHeight(180)
+        bottom_row_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        main_layout.addLayout(bottom_row, stretch=2)
+        main_layout.addWidget(bottom_row_widget, stretch=0)
  
     # -----------------------------------------------------------------------
     # Helpers
@@ -384,6 +458,53 @@ class DashboardMainWindow(QMainWindow):
     def on_export_clicked(self):
         self.export_analysis_image(auto=False)
 
+    def set_live_mode(self):
+        self.is_live = True
+        self.btn_live_state.setText("[ 🔴 AO VIVO ]")
+        self.btn_live_state.setStyleSheet(self.btn_live_state.styleSheet().replace("#eedd82", "#ff3333"))
+        
+    def on_scrubber_pressed(self):
+        self.is_live = False
+        self.btn_live_state.setText("[ ⏸ ANÁLISE ]")
+        self.btn_live_state.setStyleSheet(self.btn_live_state.styleSheet().replace("#ff3333", "#eedd82"))
+        
+    def on_scrubber_moved(self, value):
+        if self.is_live: return
+        self.lbl_track_pos_pct.setText(f"{value / 10.0:.1f}%")
+        
+        idx = self.ghost_selector.combo.currentIndex()
+        ghost = self._reference_ghost_for_index(idx)
+        if idx == 0:
+            lap_data = self.session_manager.current_lap_data
+            track_len = getattr(self._last_state, 'track_length', 4309.0) if hasattr(self, '_last_state') else 4309.0
+        else:
+            lap_data = ghost.get("telemetry", {})
+            distances = lap_data.get("distance", [])
+            track_len = max(distances) if distances else 4309.0
+            
+        distances = lap_data.get("distance", [])
+        times = lap_data.get("times", [])
+        x_arr = lap_data.get("car_x", [])
+        z_arr = lap_data.get("car_z", [])
+        
+        if not distances or not times: return
+        
+        target_dist = (value / 1000.0) * track_len
+        
+        import bisect
+        i = bisect.bisect_left(distances, target_dist)
+        if i >= len(distances): i = len(distances) - 1
+        
+        target_time = times[i]
+        
+        self.cursor_delta.setValue(target_time)
+        self.cursor_speed.setValue(target_time)
+        self.cursor_pedals.setValue(target_time)
+        self.cursor_steer.setValue(target_time)
+        
+        if i < len(x_arr) and i < len(z_arr):
+            self.sidebar_panel.track_map_card.map_widget.set_marker(x_arr[i], z_arr[i])
+
     def _update_sector_lines(self):
         """Reposition S1/S2 vertical lines using actual sector boundaries from the selected reference ghost."""
         idx = self.ghost_selector.combo.currentIndex()
@@ -448,7 +569,28 @@ class DashboardMainWindow(QMainWindow):
             state.fuel_laps_remaining = state.fuel / self.session_manager.avg_fuel_per_lap
         
         self.sidebar_panel.update_panel(state)
-        self.bottom_strip.update_strip(state)
+        # Atualiza métricas do rodapé unificado
+        self.gforce_card.update_g(state.g_lat, state.g_lon)
+        self.weather_card.update_weather(
+            ambient=state.ambient_temp,
+            track=state.track_temp,
+            grip=state.surface_grip,
+            wind_speed=state.wind_speed,
+            wind_dir=state.wind_direction
+        )
+        self.session_card.update_session(state)
+        self.assists_card.update_electronics(state)
+        self.brakes_card.update_brakes(state.brake_temp, state.brake_bias)
+        
+        for i, box in enumerate((self.tire_card.t_fl, self.tire_card.t_fr,
+                                 self.tire_card.t_rl, self.tire_card.t_rr)):
+            self.tire_card.update_tire(
+                box,
+                state.tyre_temp[i], state.tyre_pressure[i], state.tyre_wear[i],
+                t_inner=state.tyre_temp_inner[i],
+                t_middle=state.tyre_temp_middle[i],
+                t_outer=state.tyre_temp_outer[i],
+            )
 
         # Valor ao vivo de cada canal, no canto do respectivo gráfico
         self.plot_delta.set_live_value(f"{state.delta_time:+.2f}")
@@ -579,8 +721,9 @@ class DashboardMainWindow(QMainWindow):
   
         # --- Track position progress bar ---
         track_pos = getattr(state, 'track_position', 0.0)
-        self.track_pos_bar.setValue(int(track_pos * 1000))
-        self.lbl_track_pos_pct.setText(f"{track_pos * 100:.1f}%")
+        if self.is_live:
+            self.track_pos_slider.setValue(int(track_pos * 1000))
+            self.lbl_track_pos_pct.setText(f"{track_pos * 100:.1f}%")
 
         # --- Cursor + curvas dos gráficos ---------------------------------
         # Os mostradores numéricos acompanham os 60 Hz da engine, mas redesenhar
@@ -588,13 +731,23 @@ class DashboardMainWindow(QMainWindow):
         # acumula milhares de pontos e o setData tem custo proporcional.
         # Os gráficos são atualizados a ~12 Hz, que já é imperceptível ao olho.
         curr = self.session_manager.current_lap_data
-        self._graph_frame_skip = (getattr(self, "_graph_frame_skip", 0) + 1) % self.GRAPH_EVERY_N_FRAMES
+        self._graph_frame_skip = (getattr(self, "_graph_frame_skip", 0) + 1) % GRAPH_REDRAW_EVERY_N_FRAMES
         if len(curr["times"]) > 0 and self._graph_frame_skip == 0:
-            current_time_sec = curr["times"][-1]
-            self.cursor_delta.setValue(current_time_sec)
-            self.cursor_speed.setValue(current_time_sec)
-            self.cursor_pedals.setValue(current_time_sec)
-            self.cursor_steer.setValue(current_time_sec)
+            if self.is_live:
+                current_time_sec = curr["times"][-1]
+                self.cursor_delta.setValue(current_time_sec)
+                self.cursor_speed.setValue(current_time_sec)
+                self.cursor_pedals.setValue(current_time_sec)
+                self.cursor_steer.setValue(current_time_sec)
+
+                if len(curr.get("car_x", [])) > 0 and len(curr.get("car_z", [])) > 0:
+                    self.sidebar_panel.track_map_card.map_widget.set_marker(curr["car_x"][-1], curr["car_z"][-1])
+                    
+                    if self.ghost_selector.combo.currentIndex() == 0:
+                        self.sidebar_panel.track_map_card.map_widget.set_data(
+                            curr.get("car_x", []), curr.get("car_z", []),
+                            curr.get("gas", []), curr.get("brake", [])
+                        )
 
             # --- Graph data ---
             gas_100 = [g * 100.0 for g in curr["gas"]]
@@ -750,6 +903,12 @@ class DashboardMainWindow(QMainWindow):
             self.curve_ghost_gas.setData([], [])
             self.curve_ghost_brake.setData([], [])
             self.curve_ghost_steer.setData([], [])
+            
+            lap = self.session_manager.current_lap_data
+            self.sidebar_panel.track_map_card.map_widget.set_data(
+                lap.get("car_x", []), lap.get("car_z", []), 
+                lap.get("gas", []), lap.get("brake", [])
+            )
             return
         elif idx == 1:
             ghost = self.session_manager.best_lap_ghost.get("telemetry", {})
@@ -767,13 +926,27 @@ class DashboardMainWindow(QMainWindow):
             self.curve_ghost_gas.setData(x_data, ghost_gas_100)
             self.curve_ghost_brake.setData(x_data, ghost_brake_100)
             self.curve_ghost_steer.setData(x_data, ghost_steer)
+            
+            self.sidebar_panel.track_map_card.map_widget.set_data(
+                ghost.get("car_x", []), ghost.get("car_z", []), 
+                ghost.get("gas", []), ghost.get("brake", [])
+            )
         else:
             self.curve_ghost_speed.setData([], [])
             self.curve_ghost_gas.setData([], [])
             self.curve_ghost_brake.setData([], [])
             self.curve_ghost_steer.setData([], [])
+            self.sidebar_panel.track_map_card.map_widget.set_data([], [], [], [])
 
     def closeEvent(self, event):
         print("Parando Thread de Telemetria...")
         self.engine.stop() 
         event.accept()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Recalcula as proporções dos gráficos no splitter (25% cada)
+        if hasattr(self, 'plot_splitter'):
+            total_h = self.plot_splitter.height()
+            part = total_h // 4
+            self.plot_splitter.setSizes([part, part, part, total_h - (part * 3)])

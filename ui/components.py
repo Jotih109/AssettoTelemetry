@@ -13,7 +13,8 @@ import collections
 
 from PyQt5.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
-    QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView, QWidget, QComboBox
+    QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView, QWidget, QComboBox, QSizePolicy,
+    QSpacerItem
 )
 from PyQt5.QtCore import Qt, QPointF
 from PyQt5.QtGui import QFont, QColor, QPainter, QPen, QPolygonF
@@ -373,7 +374,7 @@ class TireCard(BaseCard):
         frame = QFrame()
         frame.setStyleSheet(T.inset_qss())
         vbox = QVBoxLayout(frame)
-        vbox.setContentsMargins(6, 4, 6, 4)
+        vbox.setContentsMargins(8, 8, 8, 8)
         vbox.setSpacing(1)
 
         head = QHBoxLayout()
@@ -482,10 +483,10 @@ class AssistLED(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self.pill = QLabel(label)
-        self.pill.setFont(T.f_title(7))
+        self.pill.setFont(QFont(T.FONT_MONO, 11, QFont.Bold))
         self.pill.setAlignment(Qt.AlignCenter)
-        self.pill.setFixedHeight(18)
-        self.pill.setMinimumWidth(40)
+        self.pill.setFixedHeight(26)
+        self.pill.setMinimumWidth(50)
         self._set_inactive()
         layout.addWidget(self.pill)
 
@@ -514,7 +515,8 @@ class AssistsCard(BaseCard):
     as barras mostram o quanto cada sistema está atuando naquele instante.
     """
     def __init__(self):
-        super(AssistsCard, self).__init__(title="Eletrônica")
+        super(AssistsCard, self).__init__(title="Eletrônica", margins=(4, 4, 4, 4), spacing=2)
+        self.body.setAlignment(Qt.AlignTop)
 
         leds = QGridLayout()
         leds.setSpacing(4)
@@ -524,9 +526,10 @@ class AssistsCard(BaseCard):
         self.led_drs = AssistLED("DRS")
         self.led_kers = AssistLED("KERS")
         self.led_box = AssistLED("BOX")
-        for i, led in enumerate((self.led_abs, self.led_tc, self.led_pit,
-                                 self.led_drs, self.led_kers, self.led_box)):
-            leds.addWidget(led, i // 3, i % 3)
+        for i, led in enumerate((self.led_abs, self.led_tc, 
+                                 self.led_drs, self.led_kers, 
+                                 self.led_pit, self.led_box)):
+            leds.addWidget(led, i // 2, i % 2)
         self.body.addLayout(leds)
 
         self.bar_abs = self._make_bar(AssistLED.COLORS["ABS"])
@@ -538,6 +541,9 @@ class AssistsCard(BaseCard):
         self.body.addWidget(self.row_ffb)
         # Alias antigo
         self.lbl_ffb = self.lbl_ffb_v
+
+        # Espaçador vertical para empurrar o conteúdo para cima, alinhando ao topo
+        self.body.addSpacerItem(QSpacerItem(20, 0, QSizePolicy.Minimum, QSizePolicy.Expanding))
 
     @staticmethod
     def _make_bar(color: str) -> QProgressBar:
@@ -729,10 +735,10 @@ class WeatherCard(BaseCard):
     def __init__(self):
         super(WeatherCard, self).__init__(title="Pista")
 
-        self.row_amb, self.lbl_amb_v = T.channel_row("Ar", "--", "°C")
-        self.row_trk, self.lbl_trk_v = T.channel_row("Asfalto", "--", "°C")
-        self.row_grip, self.lbl_grip_v = T.channel_row("Aderência", "--", "%")
-        self.row_wind, self.lbl_wind_v = T.channel_row("Vento", "--", "km/h")
+        self.row_amb, self.lbl_amb_v = T.channel_row("Ar", "--", "°C", value_size=10, label_size=10)
+        self.row_trk, self.lbl_trk_v = T.channel_row("Asfalto", "--", "°C", value_size=10, label_size=10)
+        self.row_grip, self.lbl_grip_v = T.channel_row("Aderência", "--", "%", value_size=10, label_size=10)
+        self.row_wind, self.lbl_wind_v = T.channel_row("Vento", "--", "km/h", value_size=10, label_size=10)
         for row in (self.row_amb, self.row_trk, self.row_grip, self.row_wind):
             self.body.addWidget(row)
 
@@ -869,11 +875,11 @@ class SessionCard(BaseCard):
     def __init__(self):
         super(SessionCard, self).__init__(title="Sessão")
 
-        self.row_pos, self.lbl_pos_v = T.channel_row("Posição", "--", "")
-        self.row_laps, self.lbl_laps_v = T.channel_row("Volta", "--", "")
-        self.row_left, self.lbl_left_v = T.channel_row("Restante", "--", "")
-        self.row_comp, self.lbl_comp_v = T.channel_row("Composto", "--", "")
-        self.row_dmg, self.lbl_dmg_v = T.channel_row("Danos", "0", "%")
+        self.row_pos, self.lbl_pos_v = T.channel_row("Posição", "--", "", value_size=10, label_size=10)
+        self.row_laps, self.lbl_laps_v = T.channel_row("Volta", "--", "", value_size=10, label_size=10)
+        self.row_left, self.lbl_left_v = T.channel_row("Restante", "--", "", value_size=10, label_size=10)
+        self.row_comp, self.lbl_comp_v = T.channel_row("Composto", "--", "", value_size=10, label_size=10)
+        self.row_dmg, self.lbl_dmg_v = T.channel_row("Danos", "0", "%", value_size=10, label_size=10)
         for row in (self.row_pos, self.row_laps, self.row_left,
                     self.row_comp, self.row_dmg):
             self.body.addWidget(row)
@@ -952,7 +958,7 @@ class BrakesCard(BaseCard):
         box = QFrame()
         box.setStyleSheet(T.inset_qss())
         vbox = QVBoxLayout(box)
-        vbox.setContentsMargins(6, 3, 6, 3)
+        vbox.setContentsMargins(8, 8, 8, 8)
         vbox.setSpacing(1)
 
         head = QHBoxLayout()
@@ -1016,7 +1022,7 @@ class GForceCard(BaseCard):
     TRAIL_LEN = 120      # Amostras no rastro (~2 s a 60 Hz)
 
     def __init__(self):
-        super(GForceCard, self).__init__(title="Força G")
+        super(GForceCard, self).__init__(title="Força G", margins=(6, 6, 6, 6))
         self._trail = collections.deque(maxlen=self.TRAIL_LEN)
         self._lat = 0.0
         self._lon = 0.0
@@ -1029,6 +1035,15 @@ class GForceCard(BaseCard):
         self.row_lat, self.lbl_lat_v = T.channel_row("Lateral", "+0.00", "g")
         self.row_lon, self.lbl_lon_v = T.channel_row("Longitud.", "+0.00", "g")
         self.row_peak, self.lbl_peak_v = T.channel_row("Pico", "0.0/0.0", "g")
+        
+        # Alinhamento e largura mínima para evitar encavalamento com 'g'
+        for row, lbl in ((self.row_lat, self.lbl_lat_v), 
+                         (self.row_lon, self.lbl_lon_v), 
+                         (self.row_peak, self.lbl_peak_v)):
+            lbl.setMinimumWidth(45)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            row.layout().setAlignment(Qt.AlignRight)
+        
         self.body.addWidget(self.row_lat)
         self.body.addWidget(self.row_lon)
         self.body.addWidget(self.row_peak)
@@ -1246,7 +1261,7 @@ class LapHistoryTable(QTableWidget):
             QHeaderView::section {{
                 background-color: {T.BG_HEADER};
                 color: {T.TXT_TITLE};
-                padding: 3px;
+                padding: 1px;
                 border: none;
                 border-bottom: 1px solid {T.BORDER};
                 font-family: "{T.FONT_UI}";
@@ -1254,9 +1269,11 @@ class LapHistoryTable(QTableWidget):
                 font-weight: bold;
             }}
         """)
-        self.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.horizontalHeader().setStretchLastSection(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.verticalHeader().setVisible(False)
-        self.verticalHeader().setDefaultSectionSize(22)
+        self.verticalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.setEditTriggers(QTableWidget.NoEditTriggers)
         self.setSelectionMode(QTableWidget.NoSelection)
         self.setShowGrid(True)
@@ -1275,3 +1292,86 @@ class LapHistoryTable(QTableWidget):
                 if item:
                     item.setBackground(QColor("#12241a"))
                     item.setForeground(QColor(T.OK))
+
+class TrackMapWidget(QWidget):
+    def __init__(self):
+        super(TrackMapWidget, self).__init__()
+        self._x = []
+        self._z = []
+        self._gas = []
+        self._brake = []
+        self._marker_x = None
+        self._marker_z = None
+        
+    def set_data(self, x, z, gas, brake):
+        self._x = x
+        self._z = z
+        self._gas = gas
+        self._brake = brake
+        self.update()
+        
+    def set_marker(self, x, z):
+        self._marker_x = x
+        self._marker_z = z
+        self.update()
+        
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        if not self._x or len(self._x) < 2:
+            return
+            
+        min_x, max_x = min(self._x), max(self._x)
+        min_z, max_z = min(self._z), max(self._z)
+        
+        w, h = self.width(), self.height()
+        range_x = max(1.0, max_x - min_x)
+        range_z = max(1.0, max_z - min_z)
+        
+        margin = 15
+        avail_w = w - margin * 2
+        avail_h = h - margin * 2
+        
+        scale = min(avail_w / range_x, avail_h / range_z)
+        
+        cx = (min_x + max_x) / 2
+        cz = (min_z + max_z) / 2
+        
+        def to_screen(px, pz):
+            sx = (px - cx) * scale + w / 2
+            sy = -(pz - cz) * scale + h / 2
+            return QPointF(sx, sy)
+            
+        for i in range(len(self._x) - 1):
+            p1 = to_screen(self._x[i], self._z[i])
+            p2 = to_screen(self._x[i+1], self._z[i+1])
+            
+            g = self._gas[i] if i < len(self._gas) else 0.0
+            b = self._brake[i] if i < len(self._brake) else 0.0
+            
+            if b > 0.1:
+                color = QColor(T.CH_BRAKE)
+            elif g > 0.1:
+                color = QColor(T.CH_THROTTLE)
+            else:
+                color = QColor("#FFEA00")
+                
+            pen = QPen(color, 2.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.drawLine(p1, p2)
+            
+        if self._marker_x is not None and self._marker_z is not None:
+            mp = to_screen(self._marker_x, self._marker_z)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#FFEA00"))
+            painter.drawEllipse(mp, 5, 5)
+
+class TrackMapCard(BaseCard):
+    def __init__(self):
+        super(TrackMapCard, self).__init__(title="MAPA DA PISTA", margins=(0, 5, 0, 5))
+        self.map_widget = TrackMapWidget()
+        self.map_widget.setMinimumSize(180, 180)
+        self.map_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+        self.body.addWidget(self.map_widget)

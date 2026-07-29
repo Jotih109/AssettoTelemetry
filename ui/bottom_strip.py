@@ -11,55 +11,58 @@ Cada painel tem largura fixa e altura elástica, para que todos comecem e
 terminem na mesma linha — a folga que sobrar vai para o histórico de voltas.
 """
 
-from PyQt5.QtWidgets import QWidget, QHBoxLayout, QSizePolicy
+from PyQt5.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, QSizePolicy
 from core.models import TelemetryState
-from ui.components import GForceCard, BrakesCard, WeatherCard, TireCard
+from ui.components import BrakesCard, TireCard, SessionCard, AssistsCard
+from ui import theme as T
 
 
 class BottomStrip(QWidget):
-    # Largura de cada painel, na ordem em que aparecem
-    WIDTHS = {"gforce": 175, "brakes": 235, "weather": 170, "tires": 290}
-
     def __init__(self):
         super().__init__()
         self.setStyleSheet("background: transparent;")
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        self.gforce_card = GForceCard()
+        # Usando um único painel integrado sem título
+        self.panel = T.Panel(body_margins=(4, 4, 4, 4))
+        
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(4)
+
+        self.session_card = SessionCard()
+        self.assists_card = AssistsCard()
         self.brakes_card = BrakesCard()
-        self.weather_card = WeatherCard()
         self.tire_card = TireCard()
 
-        for key, card in (("gforce", self.gforce_card),
-                          ("brakes", self.brakes_card),
-                          ("weather", self.weather_card),
-                          ("tires", self.tire_card)):
-            card.setFixedWidth(self.WIDTHS[key])
-            # Altura elástica: todos os painéis preenchem a altura da faixa
-            card.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-            layout.addWidget(card)
+        # Remove bordas individuais de cada card para unificar no painel principal
+        cards = (self.session_card, self.assists_card, self.brakes_card, self.tire_card)
+                 
+        for card in cards:
+            card.setStyleSheet(card.styleSheet().replace(f"border: 1px solid {T.BORDER};", "border: none;"))
+            card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            
+        grid.addWidget(self.session_card, 0, 0)
+        grid.addWidget(self.assists_card, 0, 1)
+        grid.addWidget(self.brakes_card, 1, 0)
+        grid.addWidget(self.tire_card, 1, 1)
+
+        self.panel.body.addLayout(grid)
+        main_layout.addWidget(self.panel)
 
     def update_strip(self, state: TelemetryState):
         if not state.is_connected:
             return
 
-        # Força G lateral x longitudinal (com rastro dos últimos instantes)
-        self.gforce_card.update_g(state.g_lat, state.g_lon)
+        # Sessão e Eletrônica (movidos da sidebar)
+        self.session_card.update_session(state)
+        self.assists_card.update_electronics(state)
 
         # Temperatura dos freios + distribuição de frenagem
         self.brakes_card.update_brakes(state.brake_temp, state.brake_bias)
-
-        # AC1 não tem chuva: mostramos aderência da pista e vento
-        self.weather_card.update_weather(
-            ambient=state.ambient_temp,
-            track=state.track_temp,
-            grip=state.surface_grip,
-            wind_speed=state.wind_speed,
-            wind_dir=state.wind_direction,
-        )
 
         # Pneus: temperatura do núcleo, pressão, desgaste e I/M/E da banda
         for i, box in enumerate((self.tire_card.t_fl, self.tire_card.t_fr,

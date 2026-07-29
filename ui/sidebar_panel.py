@@ -1,11 +1,11 @@
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QScrollArea, QSizePolicy
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 from core.models import TelemetryState
 from ui import theme as T
 from ui.components import (
-    GearCard, SpeedCard, RpmCard, CarDataCard, SessionCard, AssistsCard,
-    PedalsBarCard, SteeringWheelCard,
+    GearCard, SpeedCard, RpmCard, CarDataCard,
+    PedalsBarCard, SteeringWheelCard, TrackMapCard
 )
 
 
@@ -19,22 +19,36 @@ class SidebarPanel(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setFixedWidth(250)
+        self.setFixedWidth(240)
         self.setStyleSheet(f"background-color: {T.BG_APP}; border: none;")
 
-        main_layout = QVBoxLayout(self)
+        base_layout = QVBoxLayout(self)
+        base_layout.setContentsMargins(0, 0, 0, 0)
+        
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        
+        scroll_widget = QWidget()
+        scroll_widget.setStyleSheet("background: transparent;")
+        main_layout = QVBoxLayout(scroll_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(6)
+        main_layout.setSpacing(4)
+        
+        scroll_area.setWidget(scroll_widget)
+        base_layout.addWidget(scroll_area)
 
         # --- Cabeçalho: conexão + pista/carro ---
         header = QFrame()
         header.setStyleSheet(T.panel_qss())
         head_lay = QVBoxLayout(header)
-        head_lay.setContentsMargins(7, 5, 7, 6)
+        head_lay.setContentsMargins(4, 4, 4, 4)
         head_lay.setSpacing(2)
 
         conn_row = QHBoxLayout()
-        conn_row.setSpacing(5)
+        conn_row.setSpacing(4)
         self._conn_dot = QLabel("■")
         self._conn_dot.setFont(QFont(T.FONT_MONO, 8))
         self._conn_dot.setStyleSheet(f"color: {T.BAD}; background: transparent; border: none;")
@@ -67,30 +81,32 @@ class SidebarPanel(QWidget):
         self.speed_card = SpeedCard()
         self.rpm_card = RpmCard()
         self.car_data_card = CarDataCard()
-        self.session_card = SessionCard()
-        self.assists_card = AssistsCard()
         self.steer_card = SteeringWheelCard()
 
-        main_layout.addWidget(self.rpm_card)
+        main_layout.addWidget(self.rpm_card, stretch=0)
 
         # Marcha + Velocidade empilhados, pedais ao lado
         gear_speed_col = QVBoxLayout()
-        gear_speed_col.setSpacing(6)
+        gear_speed_col.setSpacing(4)
         gear_speed_col.addWidget(self.gear_card)
         gear_speed_col.addWidget(self.speed_card)
         gear_speed_col.addWidget(self.steer_card)
 
         top_row = QHBoxLayout()
-        top_row.setSpacing(6)
+        top_row.setSpacing(4)
         top_row.addWidget(self.pedals_bar_card)
         top_row.addLayout(gear_speed_col, stretch=1)
-        main_layout.addLayout(top_row)
+        main_layout.addLayout(top_row, stretch=0)
 
-        main_layout.addWidget(self.car_data_card)
-        main_layout.addWidget(self.assists_card)
-        main_layout.addWidget(self.session_card)
+        main_layout.addWidget(self.car_data_card, stretch=0)
+        
+        self.track_map_card = TrackMapCard()
+        self.track_map_card.setMinimumHeight(180)
+        self.track_map_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        main_layout.addWidget(self.track_map_card, stretch=1)
 
-        main_layout.addStretch()
+        # Removemos o addStretch() para que o TrackMapCard ocupe o espaço restante
+
 
     def update_panel(self, state: TelemetryState):
         if not state.is_connected:
@@ -134,9 +150,3 @@ class SidebarPanel(QWidget):
 
         # Update Steering Wheel
         self.steer_card.update_steer(state.steer_angle)
-
-        # Sessão
-        self.session_card.update_session(state)
-
-        # Eletrônica — ABS/TC com intensidade real de intervenção
-        self.assists_card.update_electronics(state)

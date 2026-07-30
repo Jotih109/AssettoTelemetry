@@ -286,7 +286,10 @@ class RpmCard(QFrame):
 
 
 class CarDataCard(BaseCard):
-    """Combustível, bateria ERS/Híbrida, autonomia, turbo e volante — em linhas de canal."""
+    """Combustível, bateria ERS/Híbrida, autonomia e turbo — em linhas de canal.
+
+    O ângulo do volante é mostrado pelo widget de volante da sidebar, não aqui.
+    """
     def __init__(self):
         super(CarDataCard, self).__init__(title="Carro")
 
@@ -338,7 +341,6 @@ class CarDataCard(BaseCard):
         self.lbl_fuel_v.setText(f"{fuel:.1f}")
         self.lbl_laps_v.setText(f"{laps:.1f}")
         self.lbl_turbo_v.setText(f"{turbo:.2f}")
-        self.lbl_steer_v.setText(f"{int(steer)}")
         self.lbl_avg_v.setText(f"{fuel_avg:.2f}" if fuel_avg > 0 else "--")
 
         if fuel_capacity > 0:

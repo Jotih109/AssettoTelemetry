@@ -1,4 +1,4 @@
-# 🏎️ Claudio — Dashboard de Telemetria para Assetto Corsa (MoTeC i2 Style)
+# 🏎️ ApexView — Dashboard de Telemetria para Assetto Corsa (MoTeC i2 Style)
 
 > ⚠️ **PROJETO EM DESENVOLVIMENTO ATIVO** — Dashboard profissional de telemetria em tempo real para Assetto Corsa 1, inspirado nos layouts de engenharia de dados do **MoTeC i2 Pro**.
 
@@ -6,7 +6,7 @@
 
 ## 📖 Sobre o Projeto
 
-**Claudio** (AssettoCorsa-Telemetry) é uma ferramenta de telemetria e análise de desempenho em tempo real desenvolvida em **Python**, **PyQt5** e **PyQtGraph** para o **Assetto Corsa 1**. A aplicação acessa diretamente a **memória compartilhada** do jogo (`acpmf_physics`, `acpmf_graphics`, `acpmf_static`), processando telemetria a 60 Hz sem a necessidade de plugins externos ou configurações complexas de porta UDP.
+**ApexView** (AssettoCorsa-Telemetry) é uma ferramenta de telemetria e análise de desempenho em tempo real desenvolvida em **Python**, **PyQt5** e **PyQtGraph** para o **Assetto Corsa 1**. A aplicação acessa diretamente a **memória compartilhada** do jogo (`acpmf_physics`, `acpmf_graphics`, `acpmf_static`), processando telemetria a 60 Hz sem a necessidade de plugins externos ou configurações complexas de porta UDP.
 
 > 💡 **Conexão Zero-Config:** Basta abrir o dashboard e entrar na pista. O sistema detecta automaticamente o jogo, conecta, sincroniza dados e reconecta se você reiniciar a sessão ou trocar de carro/pista.
 
@@ -39,14 +39,14 @@
 
 ---
 
-### ⚡ Painel de Eletrônica e Sistemas (Formato 1 / 0)
-- **Status Compacto de Equipamentos (1 / 0):**
-  - `ABS 1` / `ABS 0` — Indica se o carro é equipado com ABS.
-  - `TC 1` / `TC 0` — Indica se o carro é equipado com Controle de Tração.
-  - `DRS 1` / `DRS 0` — Indica se o carro tem asa móvel (DRS).
-  - `KERS 1` / `KERS 0` — Indica presença de ERS/KERS.
-  - `PIT 1` / `PIT 0` — Status do limitador de velocidade de box.
-  - `BOX 1` / `BOX 0` — Status de entrada na linha de pit lane / boxes.
+### ⚡ Painel de Eletrônica e Sistemas (Formato I / 0)
+- **Status Compacto de Equipamentos (I / 0 na extrema esquerda):**
+  - ` I  ABS` / ` 0  ABS` — Indica se o carro é equipado com ABS.
+  - ` I  TC` / ` 0  TC` — Indica se o carro é equipado com Controle de Tração.
+  - ` I  DRS` / ` 0  DRS` — Indica se o carro tem asa móvel (DRS).
+  - ` I  KERS` / ` 0  KERS` — Indica presença de ERS/KERS.
+  - ` I  PIT` / ` 0  PIT` — Status do limitador de velocidade de box.
+  - ` I  BOX` / ` 0  BOX` — Status de entrada na linha de pit lane / boxes.
 - **Alertas de Atuação Dinâmica:**
   - O indicador `ABS 1` acende/pisca em **amarelo brilhante** exclusivamente nos momentos de intervenção ativa no freio.
   - O indicador `TC 1` acende quando ocorre corte pelo controle de tração.

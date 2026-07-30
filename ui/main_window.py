@@ -692,14 +692,26 @@ class DashboardMainWindow(QMainWindow):
     # -----------------------------------------------------------------------
 
     def _reference_ghost_for_index(self, idx: int) -> dict:
-        """Maps the Ghost Selector combo index to the corresponding stored ghost."""
+        """Maps the Ghost Selector combo index to the corresponding stored ghost.
+
+        Quando idx == 0 ('Desativado'), as curvas do ghost não são exibidas
+        nos gráficos, mas ainda usamos o session best como referência numérica
+        (delta, ref, est). Assim o piloto sempre vê valores significativos.
+        """
         if idx == 1:   # Personal Best
             return self.session_manager.best_lap_ghost
         elif idx == 2:  # Session Record
             return self.session_manager.session_best_lap_ghost
         elif idx == 3:  # Ideal Lap
             return self.session_manager.ideal_lap_ghost
-        return self.session_manager._empty_ghost()
+        # idx == 0 (Desativado): usa session best como referência automática
+        # se disponível, senão usa o personal best, senão ghost vazio.
+        sbg = self.session_manager.session_best_lap_ghost
+        if sbg.get("telemetry", {}).get("times"):
+            return sbg
+        blg = self.session_manager.best_lap_ghost
+        if blg.get("telemetry", {}).get("times"):
+            return blg
         return self.session_manager._empty_ghost()
 
     def on_telemetry_update(self, state: TelemetryState):
@@ -780,8 +792,12 @@ class DashboardMainWindow(QMainWindow):
         # the telemetry data used for delta calculation.
         has_valid_reference = False
         ref_lap_str = "--:--.---"
-        
-        if idx == 1: # Personal Best
+
+        if idx == 0:  # Desativado — usa session best ou personal best como ref automática
+            sbg_str = self.session_manager.session_best_lap_ghost["metadata"].get("lap_time_str", "") or ""
+            blg_str = self.session_manager.best_lap_ghost["metadata"].get("lap_time_str", "") or ""
+            ref_lap_str = sbg_str or blg_str or "--:--.---"
+        elif idx == 1: # Personal Best
             ref_lap_str = (
                 self.session_manager.best_lap_ghost["metadata"].get("lap_time_str", "")
                 or best_time_str
@@ -790,7 +806,7 @@ class DashboardMainWindow(QMainWindow):
             ref_lap_str = self.session_manager.session_best_lap_ghost["metadata"].get("lap_time_str", "--:--.---") or "--:--.---"
         elif idx == 3: # Ideal Lap
             ref_lap_str = self.session_manager.ideal_lap_ghost["metadata"].get("lap_time_str", "--:--.---") or "--:--.---"
-            
+
         if self._parse_time_ms(ref_lap_str) > 0:
             has_valid_reference = True
 
@@ -906,10 +922,19 @@ class DashboardMainWindow(QMainWindow):
                     )
 
             # --- Graph data ---
+            live_delta = []
             if self.is_live:
                 gas_100 = [g * 100.0 for g in curr["gas"]]
                 brake_100 = [b * 100.0 for b in curr["brake"]]
-                self.curve_delta.setData(curr["times"], curr.get("delta", []))
+
+                # Recalcula o delta ao vivo usando interpolação por distância
+                # (igual ao render_selected_lap) para garantir que o gráfico
+                # funciona independentemente do momento em que o ghost foi carregado.
+                ref_idx = self.ghost_selector.combo.currentIndex()
+                ref_ghost = self._reference_ghost_for_index(ref_idx)
+                live_delta = self._calc_lap_delta(curr, ref_ghost)
+
+                self.curve_delta.setData(curr["times"], live_delta)
                 self.curve_speed.setData(curr["times"], curr["speed"])
                 self.curve_gas.setData(curr["times"], gas_100)
                 self.curve_brake.setData(curr["times"], brake_100)
@@ -936,7 +961,7 @@ class DashboardMainWindow(QMainWindow):
                     self.plot_speed.setLimits(yMin=0, yMax=max(self._speed_y_max + 50, 350))
 
             # Escala Y dinâmica para Delta
-            delta_arr = curr.get("delta", [])
+            delta_arr = live_delta if self.is_live else curr.get("delta", [])
             if delta_arr:
                 max_d = max([abs(d) for d in delta_arr] + [1.0])
                 target_d = max_d * 1.2
@@ -990,6 +1015,18 @@ class DashboardMainWindow(QMainWindow):
         if getattr(self, '_last_historic_count', -1) != historic_count:
             self._last_historic_count = historic_count
             self.update_lap_selector_items()
+
+            # Ao completar uma volta, fixa o traçado cinza permanente da pista
+            # usando as coordenadas reais da última volta gravada.
+            # Isso garante que o mapa sempre tenha o contorno cinza como base,
+            # independentemente de haver um ghost carregado.
+            if self.session_manager.completed_laps:
+                last_lap_telem = self.session_manager.completed_laps[-1].get("telemetry", {})
+                lx = last_lap_telem.get("car_x", [])
+                lz = last_lap_telem.get("car_z", [])
+                if len(lx) >= 2:
+                    self.sidebar_panel.track_map_card.map_widget.set_base_trace(lx, lz)
+
             best_time_ms = 0
             best_row_idx = -1
 

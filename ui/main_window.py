@@ -155,6 +155,7 @@ class DashboardMainWindow(QMainWindow):
         graph_header_row.addSpacing(15)
 
         self.ghost_selector = GhostSelectorCard()
+        self.ghost_selector.combo.currentIndexChanged.connect(self.on_ghost_mode_changed)
         graph_header_row.addWidget(self.ghost_selector, alignment=Qt.AlignVCenter)
         graph_header_row.addSpacing(15)
         
@@ -244,7 +245,9 @@ class DashboardMainWindow(QMainWindow):
         self.curve_delta = self.plot_delta.plot(pen=pg.mkPen(color="#FF9100", width=1.8))
         self.curve_speed = self.plot_speed.plot(pen=pg.mkPen(color=T.CH_SPEED, width=1.8))
         self.curve_gas = self.plot_pedals.plot(pen=pg.mkPen(color=T.CH_THROTTLE, width=1.8))
+        self.curve_gas_tc = self.plot_pedals.plot(pen=pg.mkPen(color="#1E90FF", width=2.4))
         self.curve_brake = self.plot_pedals.plot(pen=pg.mkPen(color=T.CH_BRAKE, width=1.8))
+        self.curve_brake_abs = self.plot_pedals.plot(pen=pg.mkPen(color="#FFEA00", width=2.4))
         self.curve_steer = self.plot_steer.plot(pen=pg.mkPen(color="#FFEA00", width=1.8))
 
         self.plot_splitter = QSplitter(Qt.Vertical)
@@ -559,7 +562,18 @@ class DashboardMainWindow(QMainWindow):
             return
 
         gas_100 = [g * 100.0 for g in telemetry.get("gas", [])]
+        tc_arr = telemetry.get("tc_intervention", [])
+        gas_tc_100 = [
+            gas_100[i] if (i < len(tc_arr) and tc_arr[i] > 0.02) else float('nan')
+            for i in range(len(gas_100))
+        ]
+
         brake_100 = [b * 100.0 for b in telemetry.get("brake", [])]
+        abs_arr = telemetry.get("abs_intervention", [])
+        brake_abs_100 = [
+            brake_100[i] if (i < len(abs_arr) and abs_arr[i] > 0.02) else float('nan')
+            for i in range(len(brake_100))
+        ]
 
         ref_idx = self.ghost_selector.combo.currentIndex()
         ref_ghost = self._reference_ghost_for_index(ref_idx)
@@ -568,7 +582,9 @@ class DashboardMainWindow(QMainWindow):
         self.curve_delta.setData(times, delta_arr)
         self.curve_speed.setData(times, telemetry.get("speed", []))
         self.curve_gas.setData(times, gas_100)
+        self.curve_gas_tc.setData(times, gas_tc_100)
         self.curve_brake.setData(times, brake_100)
+        self.curve_brake_abs.setData(times, brake_abs_100)
         self.curve_steer.setData(times, telemetry.get("steer", []))
 
         max_time = max(times) if times else 120.0
@@ -889,6 +905,7 @@ class DashboardMainWindow(QMainWindow):
             self.setWindowTitle(f"Telemetry Pro — {state.track_name} | {state.car_name}")
             if self.session_manager.auto_load_ghosts(state):
                 self.on_ghost_mode_changed()
+            self._update_best_map_base_trace()
             self.update_lap_selector_items()
   
         # --- Track position progress bar ---
@@ -925,7 +942,18 @@ class DashboardMainWindow(QMainWindow):
             live_delta = []
             if self.is_live:
                 gas_100 = [g * 100.0 for g in curr["gas"]]
+                tc_arr = curr.get("tc_intervention", [])
+                gas_tc_100 = [
+                    gas_100[i] if (i < len(tc_arr) and tc_arr[i] > 0.02) else float('nan')
+                    for i in range(len(gas_100))
+                ]
+
                 brake_100 = [b * 100.0 for b in curr["brake"]]
+                abs_arr = curr.get("abs_intervention", [])
+                brake_abs_100 = [
+                    brake_100[i] if (i < len(abs_arr) and abs_arr[i] > 0.02) else float('nan')
+                    for i in range(len(brake_100))
+                ]
 
                 # Recalcula o delta ao vivo usando interpolação por distância
                 # (igual ao render_selected_lap) para garantir que o gráfico
@@ -937,7 +965,9 @@ class DashboardMainWindow(QMainWindow):
                 self.curve_delta.setData(curr["times"], live_delta)
                 self.curve_speed.setData(curr["times"], curr["speed"])
                 self.curve_gas.setData(curr["times"], gas_100)
+                self.curve_gas_tc.setData(curr["times"], gas_tc_100)
                 self.curve_brake.setData(curr["times"], brake_100)
+                self.curve_brake_abs.setData(curr["times"], brake_abs_100)
                 self.curve_steer.setData(curr["times"], curr.get("steer", []))
 
             # Escala Y dinâmica para velocidade
@@ -1015,17 +1045,7 @@ class DashboardMainWindow(QMainWindow):
         if getattr(self, '_last_historic_count', -1) != historic_count:
             self._last_historic_count = historic_count
             self.update_lap_selector_items()
-
-            # Ao completar uma volta, fixa o traçado cinza permanente da pista
-            # usando as coordenadas reais da última volta gravada.
-            # Isso garante que o mapa sempre tenha o contorno cinza como base,
-            # independentemente de haver um ghost carregado.
-            if self.session_manager.completed_laps:
-                last_lap_telem = self.session_manager.completed_laps[-1].get("telemetry", {})
-                lx = last_lap_telem.get("car_x", [])
-                lz = last_lap_telem.get("car_z", [])
-                if len(lx) >= 2:
-                    self.sidebar_panel.track_map_card.map_widget.set_base_trace(lx, lz)
+            self._update_best_map_base_trace()
 
             best_time_ms = 0
             best_row_idx = -1
@@ -1087,6 +1107,46 @@ class DashboardMainWindow(QMainWindow):
         # Historic data is managed by _update_live_lap_history via session_manager.historic_laps
         pass
 
+    def _update_best_map_base_trace(self):
+        """Fixa o traçado cinza permanente da pista no mapa usando a MELHOR
+        volta válida disponível (Session Best, Personal Best ou a volta mais rápida da sessão)."""
+        candidates = []
+
+        # 1. Session Best da sessão atual
+        sbg = self.session_manager.session_best_lap_ghost
+        sbg_t = sbg.get("telemetry", {})
+        sbg_str = sbg.get("metadata", {}).get("lap_time_str", "")
+        sbg_ms = self._parse_time_ms(sbg_str)
+        if len(sbg_t.get("car_x", [])) >= 2 and sbg_ms > 30000:
+            candidates.append((sbg_ms, sbg_t["car_x"], sbg_t["car_z"]))
+
+        # 2. Personal Best gravado em disco
+        blg = self.session_manager.best_lap_ghost
+        blg_t = blg.get("telemetry", {})
+        blg_str = blg.get("metadata", {}).get("lap_time_str", "")
+        blg_ms = self._parse_time_ms(blg_str)
+        if len(blg_t.get("car_x", [])) >= 2 and blg_ms > 30000:
+            candidates.append((blg_ms, blg_t["car_x"], blg_t["car_z"]))
+
+        # 3. Voltas concluídas na sessão atual
+        for lap in self.session_manager.completed_laps:
+            t_str = lap.get("lap_time_str", "--:--.---")
+            ms = self._parse_time_ms(t_str)
+            telem = lap.get("telemetry", {})
+            cx, cz = telem.get("car_x", []), telem.get("car_z", [])
+            if len(cx) >= 2 and ms > 30000:
+                candidates.append((ms, cx, cz))
+
+        if candidates:
+            candidates.sort(key=lambda item: item[0])
+            best_cx, best_cz = candidates[0][1], candidates[0][2]
+            self.sidebar_panel.track_map_card.map_widget.set_base_trace(best_cx, best_cz)
+        elif self.session_manager.completed_laps:
+            last_telem = self.session_manager.completed_laps[-1].get("telemetry", {})
+            cx, cz = last_telem.get("car_x", []), last_telem.get("car_z", [])
+            if len(cx) >= 2:
+                self.sidebar_panel.track_map_card.map_widget.set_base_trace(cx, cz)
+
     def on_ghost_mode_changed(self):
         idx = self.ghost_selector.combo.currentIndex()
         ghost = None
@@ -1096,12 +1156,7 @@ class DashboardMainWindow(QMainWindow):
             self.curve_ghost_gas.setData([], [])
             self.curve_ghost_brake.setData([], [])
             self.curve_ghost_steer.setData([], [])
-            
-            lap = self.session_manager.session_best_lap_ghost.get("telemetry", {})
-            self.sidebar_panel.track_map_card.map_widget.set_data(
-                lap.get("car_x", []), lap.get("car_z", []), 
-                lap.get("gas", []), lap.get("brake", [])
-            )
+            self.sidebar_panel.track_map_card.map_widget.set_data([], [], [], [])
             return
         elif idx == 1:
             ghost = self.session_manager.best_lap_ghost.get("telemetry", {})

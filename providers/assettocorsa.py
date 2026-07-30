@@ -518,6 +518,8 @@ class AssettoCorsaTelemetryProvider(TelemetryProvider):
         state.has_drs  = bool(static.hasDRS)
         state.has_ers  = bool(static.hasERS)
         state.has_kers = bool(static.hasKERS)
+        state.has_abs  = True
+        state.has_tc   = True
 
     def _fill_physics(self, state: TelemetryState, p: SPageFilePhysics,
                       static: Optional[SPageFileStatic]):

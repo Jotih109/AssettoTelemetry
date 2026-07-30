@@ -65,6 +65,8 @@ class TelemetryState:
     sector_count: int = 3    # Número de setores da pista (do bloco estático)
 
     # --- Eletrônica e Sistemas ---
+    has_abs: bool = True
+    has_tc: bool = True
     abs_active: bool = False
     tc_active: bool = False
     pit_limiter: bool = False

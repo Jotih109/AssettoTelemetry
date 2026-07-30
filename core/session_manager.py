@@ -94,13 +94,13 @@ class SessionManager:
                 "sector_times_ms": [0, 0, 0], "timestamp": ""
             },
             "telemetry": {
-                "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "steer": [], "delta": [], "car_x": [], "car_z": []
+                "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "abs_intervention": [], "tc_intervention": []
             }
         }
         
     def reset_current_lap(self):
         self.current_lap_data = {
-            "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "steer": [], "delta": [], "car_x": [], "car_z": []
+            "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "abs_intervention": [], "tc_intervention": []
         }
         self.current_sector_times = [0, 0, 0]
 
@@ -262,6 +262,8 @@ class SessionManager:
         self.current_lap_data["delta"].append(state.delta_time)
         self.current_lap_data["car_x"].append(state.car_x)
         self.current_lap_data["car_z"].append(state.car_z)
+        self.current_lap_data["abs_intervention"].append(state.abs_intervention)
+        self.current_lap_data["tc_intervention"].append(state.tc_intervention)
 
     def _update_ideal_lap(self, state: TelemetryState, closed_sector: int, new_sector_time_ms: int):
         if closed_sector < 0 or closed_sector > 2 or new_sector_time_ms <= 0:

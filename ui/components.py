@@ -455,9 +455,9 @@ class TireCard(BaseCard):
 
 
 class AssistLED(QWidget):
-    """Indicador retangular de estado (aceso/apagado)."""
+    """Indicador retangular de estado (I/0 equipado/ativo na extrema esquerda)."""
     COLORS = {
-        "ABS":  T.CH_STEER,
+        "ABS":  "#FFEA00",  # Amarelo vibrante na intervenção do ABS
         "TC":   T.CH_SPEED,
         "PIT":  T.BAD,
         "DRS":  T.OK,
@@ -471,29 +471,36 @@ class AssistLED(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        self.pill = QLabel(label)
-        self.pill.setFont(QFont(T.FONT_MONO, 13, QFont.Bold))
-        self.pill.setAlignment(Qt.AlignCenter)
+        self.pill = QLabel()
+        self.pill.setFont(QFont(T.FONT_MONO, 11, QFont.Bold))
+        self.pill.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.pill.setFixedHeight(34)
         self.pill.setMinimumWidth(60)
-        self._set_inactive()
+        self.set_state(is_equipped=True, is_active=False)
         layout.addWidget(self.pill)
 
-    def _set_inactive(self):
-        self.pill.setStyleSheet(
-            f"color: {T.TXT_DIM}; background-color: {T.BG_INSET};"
-            f"border: 1px solid {T.BORDER_SOFT}; border-radius: 0px;"
-        )
-
-    def set_active(self, active: bool, color: str = ""):
-        if active:
+    def set_state(self, is_equipped: bool = True, is_active: bool = False, color: str = ""):
+        val_str = "I" if is_equipped else "0"
+        self.pill.setText(f" {val_str}  {self._label}")
+        if is_active:
             bg = color or self.COLORS.get(self._label, T.OK)
             self.pill.setStyleSheet(
                 f"color: #0d0f11; background-color: {bg};"
-                f"border: 1px solid {bg}; border-radius: 0px;"
+                f"border: 1px solid {bg}; border-radius: 0px; padding-left: 6px;"
+            )
+        elif is_equipped:
+            self.pill.setStyleSheet(
+                f"color: {T.TXT_VALUE}; background-color: {T.BG_INSET};"
+                f"border: 1px solid {T.BORDER_SOFT}; border-radius: 0px; padding-left: 6px;"
             )
         else:
-            self._set_inactive()
+            self.pill.setStyleSheet(
+                f"color: {T.TXT_DIM}; background-color: {T.BG_INSET};"
+                f"border: 1px solid {T.BORDER_SOFT}; border-radius: 0px; padding-left: 6px;"
+            )
+
+    def set_active(self, active: bool, color: str = ""):
+        self.set_state(is_equipped=True, is_active=active, color=color)
 
 
 class AssistsCard(BaseCard):
@@ -549,12 +556,23 @@ class AssistsCard(BaseCard):
         return bar
 
     def update_electronics(self, state):
-        self.led_abs.set_active(state.abs_active)
-        self.led_tc.set_active(state.tc_active)
-        self.led_pit.set_active(state.pit_limiter)
-        self.led_drs.set_active(state.drs_active)
-        self.led_kers.set_active(state.kers_charge > 0.01)
-        self.led_box.set_active(state.in_pit_lane or state.in_pit)
+        has_abs  = getattr(state, 'has_abs', True)
+        has_tc   = getattr(state, 'has_tc', True)
+        has_drs  = getattr(state, 'has_drs', False)
+        has_kers = getattr(state, 'has_kers', False) or getattr(state, 'has_ers', False)
+
+        abs_interv = getattr(state, 'abs_intervention', 0.0)
+        abs_intervening = (abs_interv > 0.02) or getattr(state, 'abs_active', False)
+
+        tc_interv = getattr(state, 'tc_intervention', 0.0)
+        tc_intervening = (tc_interv > 0.02) or getattr(state, 'tc_active', False)
+
+        self.led_abs.set_state(is_equipped=has_abs, is_active=abs_intervening, color="#FFEA00")
+        self.led_tc.set_state(is_equipped=has_tc, is_active=tc_intervening, color=T.CH_SPEED)
+        self.led_pit.set_state(is_equipped=True, is_active=state.pit_limiter, color=T.BAD)
+        self.led_drs.set_state(is_equipped=has_drs, is_active=state.drs_active, color=T.OK)
+        self.led_kers.set_state(is_equipped=has_kers, is_active=(state.kers_charge > 0.01), color=T.PURPLE)
+        self.led_box.set_state(is_equipped=True, is_active=(state.in_pit_lane or state.in_pit), color="#ff8800")
 
         self.bar_abs.setValue(int(state.abs_intervention * 100))
         self.bar_tc.setValue(int(state.tc_intervention * 100))

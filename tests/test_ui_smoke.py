@@ -101,8 +101,11 @@ try:
     def switch_all_ghost_modes():
         for i in range(win.ghost_selector.combo.count()):
             win.ghost_selector.combo.setCurrentIndex(i)
-            win.on_ghost_mode_changed()
             app.processEvents()
+        # Garante que selecionar 'Desativado' (índice 0) limpa as curvas de ghost
+        win.ghost_selector.combo.setCurrentIndex(0)
+        app.processEvents()
+        assert win.curve_ghost_speed.xData is None or len(win.curve_ghost_speed.xData) == 0
 
     check("trocar entre todos os modos de referência (ghost vazio)",
           switch_all_ghost_modes)
@@ -211,6 +214,41 @@ try:
         assert win.is_live
 
     check("seletor de voltas e navegação anterior/próxima", seletor_voltas)
+
+    def test_map_base_trace_best_lap():
+        win.session_manager.completed_laps.append({
+            "lap_number": 2,
+            "lap_time_str": "1:20.100",
+            "metadata": {"track": "Spa", "car": "Test Car"},
+            "telemetry": {
+                "times": [0.0, 1.0],
+                "car_x": [100.0, 200.0],
+                "car_z": [100.0, 200.0]
+            }
+        })
+        win._update_best_map_base_trace()
+        map_w = win.sidebar_panel.track_map_card.map_widget
+        assert map_w._bg_x == [100.0, 200.0]
+
+    check("mapa cinza usa o traçado da melhor volta válida", test_map_base_trace_best_lap)
+
+    def test_abs_and_electronics_status():
+        st = provider.get_state()
+        st.has_abs = True
+        st.has_tc = True
+        st.abs_intervention = 0.5
+        st.tc_intervention = 0.4
+        win.on_telemetry_update(st)
+        app.processEvents()
+        
+        assert "I" in win.assists_card.led_abs.pill.text() and "ABS" in win.assists_card.led_abs.pill.text()
+        assert "I" in win.assists_card.led_tc.pill.text() and "TC" in win.assists_card.led_tc.pill.text()
+        abs_data = win.curve_brake_abs.yData
+        assert abs_data is not None and len(abs_data) > 0
+        tc_data = win.curve_gas_tc.yData
+        assert tc_data is not None and len(tc_data) > 0
+
+    check("ABS e TC com destaque nas curvas e eletrônica 1/0", test_abs_and_electronics_status)
 
     def desconectado():
         from core.models import TelemetryState

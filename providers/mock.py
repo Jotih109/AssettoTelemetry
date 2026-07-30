@@ -289,6 +289,9 @@ class MockTelemetryProvider(TelemetryProvider):
         state.delta_time = round(curr_s - ref_time_s, 3) if self._ref_best_ms > 0 else 0.0
 
         # Eletrônica — no AC estes valores são a intensidade da intervenção
+        state.has_abs = True
+        state.has_tc = True
+        state.has_drs = True
         state.abs_intervention = max(0.0, (brake - 0.85) / 0.15) if brake > 0.85 else 0.0
         state.tc_intervention = max(0.0, (gas - 0.90) / 0.10) if (gas > 0.90 and gear <= 3) else 0.0
         state.abs_active = state.abs_intervention > 0.02

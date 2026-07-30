@@ -286,27 +286,33 @@ class RpmCard(QFrame):
 
 
 class CarDataCard(BaseCard):
-    """Combustível, autonomia, turbo e volante — em linhas de canal."""
+    """Combustível, bateria ERS/Híbrida, autonomia, turbo e volante — em linhas de canal."""
     def __init__(self):
         super(CarDataCard, self).__init__(title="Carro")
 
         self.row_fuel, self.lbl_fuel_v = T.channel_row("Combustível", "0.0", "L")
-        self.row_laps, self.lbl_laps_v = T.channel_row("Voltas est.", "0.0", "")
-        self.row_avg,  self.lbl_avg_v  = T.channel_row("Consumo", "--", "L/v")
-        self.row_turbo, self.lbl_turbo_v = T.channel_row("Turbo", "0.00", "bar")
-        self.row_steer, self.lbl_steer_v = T.channel_row("Volante", "0", "°")
-
-        # Barra de nível do tanque logo abaixo da linha de combustível,
-        # para ficar claro a qual canal ela se refere.
         self.bar_fuel = QProgressBar()
-        self.bar_fuel.setFixedHeight(4)
+        self.bar_fuel.setFixedHeight(3)
         self.bar_fuel.setRange(0, 100)
         self.bar_fuel.setTextVisible(False)
         self._set_fuel_bar(T.OK)
 
+        self.row_energy, self.lbl_energy_v = T.channel_row("Energia ERS", "--", "%")
+        self.bar_energy = QProgressBar()
+        self.bar_energy.setFixedHeight(3)
+        self.bar_energy.setRange(0, 100)
+        self.bar_energy.setTextVisible(False)
+        self._set_energy_bar("#00e5ff")
+
+        self.row_laps, self.lbl_laps_v = T.channel_row("Voltas est.", "0.0", "")
+        self.row_avg,  self.lbl_avg_v  = T.channel_row("Consumo", "--", "L/v")
+        self.row_turbo, self.lbl_turbo_v = T.channel_row("Turbo", "0.00", "bar")
+
         self.body.addWidget(self.row_fuel)
         self.body.addWidget(self.bar_fuel)
-        for row in (self.row_laps, self.row_avg, self.row_turbo, self.row_steer):
+        self.body.addWidget(self.row_energy)
+        self.body.addWidget(self.bar_energy)
+        for row in (self.row_laps, self.row_avg, self.row_turbo):
             self.body.addWidget(row)
 
         # Aliases antigos (compatibilidade)
@@ -319,8 +325,16 @@ class CarDataCard(BaseCard):
             f"QProgressBar::chunk {{ background-color: {color}; }}"
         )
 
+    def _set_energy_bar(self, color):
+        self.bar_energy.setStyleSheet(
+            f"QProgressBar {{ background-color: {T.BG_INSET};"
+            f"border: 1px solid {T.BORDER_SOFT}; border-radius: 0px; }}"
+            f"QProgressBar::chunk {{ background-color: {color}; }}"
+        )
+
     def update_data(self, fuel: float, laps: float, turbo: float, steer: float,
-                    fuel_avg: float = 0.0, fuel_capacity: float = 0.0):
+                    fuel_avg: float = 0.0, fuel_capacity: float = 0.0,
+                    has_kers: bool = False, kers_charge: float = 0.0):
         self.lbl_fuel_v.setText(f"{fuel:.1f}")
         self.lbl_laps_v.setText(f"{laps:.1f}")
         self.lbl_turbo_v.setText(f"{turbo:.2f}")
@@ -335,6 +349,21 @@ class CarDataCard(BaseCard):
             self.lbl_fuel_v.setStyleSheet(
                 f"color: {color}; background: transparent; border: none;")
             self.row_fuel.lbl_name.setText(f"Combustível {fuel_capacity:.0f}L")
+
+        # Exibe nível de carga do ERS / Bateria Híbrida quando disponível (F1 / Hypercar / LMH / LMDh)
+        if has_kers or kers_charge > 0.0:
+            self.row_energy.setVisible(True)
+            self.bar_energy.setVisible(True)
+            e_pct = max(0.0, min(1.0, kers_charge)) * 100.0
+            self.lbl_energy_v.setText(f"{e_pct:.0f}")
+            e_color = T.BAD if e_pct < 15.0 else (T.WARN if e_pct < 30.0 else "#00e5ff")
+            self.bar_energy.setValue(int(e_pct))
+            self._set_energy_bar(e_color)
+            self.lbl_energy_v.setStyleSheet(
+                f"color: {e_color}; background: transparent; border: none;")
+        else:
+            self.row_energy.setVisible(False)
+            self.bar_energy.setVisible(False)
 
 
 class TireCard(BaseCard):

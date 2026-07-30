@@ -55,15 +55,15 @@ def _read_json_safe(path: str):
         return None
 
 
+from core.paths import get_app_dir
+
 class SessionManager:
     """
     Gerencia a sessão atual, mantendo as arrays da volta atual e da volta ideal (Theoretical Best).
     Faz o fatiamento e costura (splicing) de setores em tempo real.
     """
-    def __init__(self, data_dir="telemetry_data"):
-        self.data_dir = data_dir
-        if not os.path.exists(self.data_dir):
-            os.makedirs(self.data_dir)
+    def __init__(self, data_dir=None):
+        self.data_dir = data_dir if data_dir else get_app_dir("telemetry_data")
             
         self.historic_laps = []
         self.completed_laps = []

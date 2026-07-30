@@ -1,16 +1,15 @@
 import os
 import json
 from datetime import datetime
+from core.paths import get_app_dir
 
 class TelemetryStorageManager:
     """
     Gerencia a persistência e carregamento sob demanda (lazy loading)
     dos dados de telemetria em formato JSON leve.
     """
-    def __init__(self, base_dir="telemetry_sessions"):
-        self.base_dir = base_dir
-        if not os.path.exists(self.base_dir):
-            os.makedirs(self.base_dir)
+    def __init__(self, base_dir=None):
+        self.base_dir = base_dir if base_dir else get_app_dir("telemetry_sessions")
             
         self.current_session_dir = None
         self.summary_path = None

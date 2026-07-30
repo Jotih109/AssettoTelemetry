@@ -19,10 +19,12 @@ from ui.components import (
     GForceCard, WeatherCard, SessionCard, AssistsCard, BrakesCard, TireCard,
 )
 
+from core.paths import get_app_dir
+
 # Auto-exporta uma imagem PNG da análise sempre que uma nova Melhor Volta (Best Lap)
 # for concluída. Desligue se preferir só exportar manualmente pelo botão da UI.
 AUTO_EXPORT_ON_BEST_LAP = True
-EXPORT_DIR = "exportacoes"
+EXPORT_DIR = get_app_dir("exportacoes")
 
 # A engine emite a 60 Hz. Os cards numéricos acompanham tudo, mas as curvas
 # dos gráficos são redesenhadas 1 a cada N quadros — redesenhar milhares de
@@ -37,7 +39,7 @@ class DashboardMainWindow(QMainWindow):
         super().__init__()
         self.engine = engine
         
-        self.setWindowTitle("Telemetry Pro - Analysis Tool")
+        self.setWindowTitle("ApexView — Assetto Corsa Telemetry Pro")
         self.setGeometry(50, 50, 1400, 850)
         self.setMinimumSize(1280, 720)
 
@@ -902,7 +904,7 @@ class DashboardMainWindow(QMainWindow):
             self.last_track_car_signature = signature
             self._session_max_speed = 0.0
             # Atualiza título da janela com pista e carro
-            self.setWindowTitle(f"Telemetry Pro — {state.track_name} | {state.car_name}")
+            self.setWindowTitle(f"ApexView — {state.track_name} | {state.car_name}")
             if self.session_manager.auto_load_ghosts(state):
                 self.on_ghost_mode_changed()
             self._update_best_map_base_trace()

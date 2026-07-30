@@ -146,6 +146,8 @@ class SidebarPanel(QWidget):
             steer=state.steer_angle,
             fuel_avg=getattr(state, '_fuel_avg', 0.0),
             fuel_capacity=state.fuel_capacity,
+            has_kers=getattr(state, 'has_kers', False) or getattr(state, 'has_ers', False),
+            kers_charge=getattr(state, 'kers_charge', 0.0),
         )
 
         # Update Steering Wheel

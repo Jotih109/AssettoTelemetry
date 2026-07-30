@@ -184,6 +184,7 @@ try:
     check("scrubber (modo análise) e volta ao modo ao vivo", scrubber)
 
     def seletor_voltas():
+        win.session_manager.completed_laps.clear()
         win.session_manager.completed_laps.append({
             "lap_number": 1,
             "lap_time_str": "1:23.456",

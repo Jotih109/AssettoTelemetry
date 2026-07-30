@@ -1357,23 +1357,52 @@ class LapHistoryTable(QTableWidget):
 class TrackMapWidget(QWidget):
     def __init__(self):
         super(TrackMapWidget, self).__init__()
+        # --- Camada 1: traçado cinza permanente da pista (layout) ---
         self._bg_x = []
         self._bg_z = []
+        # --- Camada 2: traçado do ghost (opcional, sobreposto ao cinza) ---
+        self._ghost_x = []
+        self._ghost_z = []
+        self._ghost_gas = []
+        self._ghost_brake = []
+        # --- Camada 3: traçado ao vivo colorido ---
         self._live_x = []
         self._live_z = []
         self._live_gas = []
         self._live_brake = []
+        # --- Marcador do carro ---
         self._marker_x = None
         self._marker_z = None
         self._marker_gas = 0.0
         self._marker_brake = 0.0
-        
+
     def set_data(self, x, z, gas=None, brake=None):
-        """Define o traçado fixo de fundo (layout em cinza)."""
+        """Define o traçado do ghost de referência (camada 2, sobre o cinza).
+        Se não houver base trace ainda, usa estes dados também como base cinza."""
         n = min(len(x or []), len(z or []))
-        self._bg_x = list(x[:n]) if n else []
-        self._bg_z = list(z[:n]) if n else []
+        gn = min(n, len(gas or []), len(brake or [])) if gas and brake else 0
+
+        self._ghost_x = list(x[:n]) if n else []
+        self._ghost_z = list(z[:n]) if n else []
+        self._ghost_gas = list(gas[:gn]) if gn else []
+        self._ghost_brake = list(brake[:gn]) if gn else []
+
+        # Se o traçado cinza ainda não foi definido por uma volta real, usa o ghost como base
+        if len(self._bg_x) < 2 and n >= 2:
+            self._bg_x = list(x[:n])
+            self._bg_z = list(z[:n])
+
         self.update()
+
+    def set_base_trace(self, x, z):
+        """Fixa o traçado cinza permanente da pista com coordenadas reais.
+        Chamado após a primeira volta completa. Uma vez definido, não é apagado
+        por mudanças de ghost ou referência."""
+        n = min(len(x or []), len(z or []))
+        if n >= 2:
+            self._bg_x = list(x[:n])
+            self._bg_z = list(z[:n])
+            self.update()
 
     def set_live_data(self, x, z, gas, brake):
         """Define o traçado ao vivo da volta atual (colorido)."""
@@ -1383,56 +1412,96 @@ class TrackMapWidget(QWidget):
         self._live_gas = list(gas[:n]) if n else []
         self._live_brake = list(brake[:n]) if n else []
         self.update()
-        
+
     def set_marker(self, x, z, gas=0.0, brake=0.0):
         self._marker_x = x
         self._marker_z = z
         self._marker_gas = gas
         self._marker_brake = brake
         self.update()
-        
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        
-        # Pega todos os pontos disponíveis para definir o enquadramento (bounding box) do mapa
-        ref_x = self._bg_x if len(self._bg_x) >= 2 else self._live_x
-        ref_z = self._bg_z if len(self._bg_z) >= 2 else self._live_z
-        
+
+        # Determina a bounding box usando o melhor traçado disponível
+        ref_x = self._bg_x if len(self._bg_x) >= 2 else (
+            self._ghost_x if len(self._ghost_x) >= 2 else self._live_x)
+        ref_z = self._bg_z if len(self._bg_z) >= 2 else (
+            self._ghost_z if len(self._ghost_z) >= 2 else self._live_z)
+
         if not ref_x or len(ref_x) < 2:
             return
-            
+
         min_x, max_x = min(ref_x), max(ref_x)
         min_z, max_z = min(ref_z), max(ref_z)
-        
+
         w, h = self.width(), self.height()
         range_x = max(1.0, max_x - min_x)
         range_z = max(1.0, max_z - min_z)
-        
+
         margin = 15
         avail_w = w - margin * 2
         avail_h = h - margin * 2
-        
+
         scale = min(avail_w / range_x, avail_h / range_z)
-        
+
         cx = (min_x + max_x) / 2
         cz = (min_z + max_z) / 2
-        
+
         def to_screen(px, pz):
             sx = (px - cx) * scale + w / 2
             sy = -(pz - cz) * scale + h / 2
             return QPointF(sx, sy)
-            
-        # 1. Desenha o mapa de fundo (cinza fixo) via QPolygonF de alta performance
-        pts_source_x = self._bg_x if (self._bg_x and len(self._bg_x) >= 2) else self._live_x
-        pts_source_z = self._bg_z if (self._bg_x and len(self._bg_x) >= 2) else self._live_z
-        if pts_source_x and len(pts_source_x) >= 2:
-            poly_bg = QPolygonF([to_screen(px, pz) for px, pz in zip(pts_source_x, pts_source_z)])
+
+        # --- Camada 1: traçado cinza permanente (layout da pista) ---
+        draw_bg_x = self._bg_x if len(self._bg_x) >= 2 else []
+        draw_bg_z = self._bg_z if len(self._bg_z) >= 2 else []
+        if draw_bg_x:
+            poly_bg = QPolygonF([to_screen(px, pz) for px, pz in zip(draw_bg_x, draw_bg_z)])
             pen_bg = QPen(QColor("#555555"), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
             painter.setPen(pen_bg)
             painter.drawPolyline(poly_bg)
 
-        # 2. Desenha a linha ao vivo colorida agrupando segmentos contínuos da mesma cor
+        # --- Camada 2: traçado do ghost (colorido, translúcido) ---
+        if self._ghost_x and len(self._ghost_x) >= 2 and self._ghost_gas and self._ghost_brake:
+            n_ghost = len(self._ghost_x)
+            current_color = None
+            current_poly = QPolygonF()
+
+            for i in range(n_ghost):
+                p = to_screen(self._ghost_x[i], self._ghost_z[i])
+                g = self._ghost_gas[i] if i < len(self._ghost_gas) else 0.0
+                b = self._ghost_brake[i] if i < len(self._ghost_brake) else 0.0
+
+                if b > 0.1:
+                    base_col = QColor(T.CH_BRAKE)
+                elif g > 0.1:
+                    base_col = QColor(T.CH_THROTTLE)
+                else:
+                    base_col = QColor("#FFEA00")
+
+                col = QColor(base_col.red(), base_col.green(), base_col.blue(), 80)
+
+                if col != current_color:
+                    if len(current_poly) >= 2:
+                        pen_ghost = QPen(current_color, 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                        painter.setPen(pen_ghost)
+                        painter.drawPolyline(current_poly)
+                    last_pt = current_poly.last() if not current_poly.isEmpty() else None
+                    current_poly = QPolygonF()
+                    if last_pt:
+                        current_poly.append(last_pt)
+                    current_color = col
+
+                current_poly.append(p)
+
+            if len(current_poly) >= 2 and current_color is not None:
+                pen_ghost = QPen(current_color, 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                painter.setPen(pen_ghost)
+                painter.drawPolyline(current_poly)
+
+        # --- Camada 3: traçado ao vivo colorido ---
         if self._live_x and len(self._live_x) >= 2:
             n_live = len(self._live_x)
             current_color = None
@@ -1468,25 +1537,26 @@ class TrackMapWidget(QWidget):
                 painter.setPen(pen_live)
                 painter.drawPolyline(current_poly)
 
-        # 3. Pontinho do carro
+        # --- Camada 4: marcador do carro (bolinha) ---
         if self._marker_x is not None and self._marker_z is not None:
             mp = to_screen(self._marker_x, self._marker_z)
-            
+
             g = getattr(self, '_marker_gas', 0.0)
             b = getattr(self, '_marker_brake', 0.0)
-            
+
             if b > 0.1:
                 marker_color = QColor(T.CH_BRAKE)
             elif g > 0.1:
                 marker_color = QColor(T.CH_THROTTLE)
             elif g <= 0.1 and b <= 0.1:
-                marker_color = QColor("#FFEA00") # Yellow when coasting
+                marker_color = QColor("#FFEA00")
             else:
-                marker_color = QColor("#0000FF") # Blue default
-                
+                marker_color = QColor("#0000FF")
+
             painter.setPen(Qt.NoPen)
             painter.setBrush(marker_color)
             painter.drawEllipse(mp, 5, 5)
+
 
 class TrackMapCard(BaseCard):
     def __init__(self):
@@ -1494,5 +1564,5 @@ class TrackMapCard(BaseCard):
         self.map_widget = TrackMapWidget()
         self.map_widget.setMinimumSize(180, 180)
         self.map_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        
+
         self.body.addWidget(self.map_widget)

@@ -256,7 +256,7 @@ try:
         app.processEvents()
         table = win.corner_analysis_table
         assert table.rowCount() == 8, f"tabela com {table.rowCount()} linhas"
-        assert table.item(0, 0) is not None and "Senna" in table.item(0, 0).text()
+        assert table.item(0, 0) is not None and table.item(0, 0).text() == "C1"
         # Toda linha tem as sete colunas preenchidas (mesmo que com "--")
         for row in range(table.rowCount()):
             for col in range(table.columnCount()):

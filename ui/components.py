@@ -1482,11 +1482,7 @@ class CornerAnalysisTable(QTableWidget):
 
         for row, cmp_ in enumerate(comparisons):
             corner = cmp_.corner
-            name = (corner.name or "").strip()
-            if name and name not in (f"C{corner.index}", f"Curva {corner.index}", str(corner.index)):
-                label = f"C{corner.index} ({name})"
-            else:
-                label = f"C{corner.index}"
+            label = f"C{corner.index}"
             self._set(row, 0, label, T.TXT_LABEL)
 
             # Tempo gasto na curva

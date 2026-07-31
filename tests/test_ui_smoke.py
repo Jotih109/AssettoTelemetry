@@ -216,6 +216,64 @@ try:
 
     check("seletor de voltas e navegação anterior/próxima", seletor_voltas)
 
+    def seletor_ordem_mais_recente_primeiro():
+        """
+        Ordem do seletor: "Ao Vivo" primeiro e, depois, da volta mais recente
+        para a mais antiga. Cada item carrega em `itemData` o índice real em
+        completed_laps — a posição na lista NÃO é o índice da volta.
+        """
+        def fake_lap(num, t_str):
+            return {
+                "lap_number": num, "lap_time_str": t_str,
+                "metadata": {"track": "Spa", "car": "Test Car"},
+                "telemetry": {
+                    "times": [0.0, 1.0, 2.0], "distance": [0.0, 20.0, 40.0],
+                    "speed": [100.0, 120.0, 140.0], "gas": [1.0, 1.0, 0.8],
+                    "brake": [0.0, 0.0, 0.0], "steer": [0.0, 5.0, -2.0],
+                    "car_x": [10.0, 20.0, 30.0], "car_z": [10.0, 20.0, 30.0],
+                },
+            }
+
+        win.session_manager.completed_laps.clear()
+        for num, t in ((1, "1:23.456"), (2, "1:22.100"), (3, "1:24.900")):
+            win.session_manager.completed_laps.append(fake_lap(num, t))
+        win.update_lap_selector_items()
+        app.processEvents()
+
+        combo = win.lap_selector.combo
+        assert combo.count() == 4
+        assert "Ao Vivo" in combo.itemText(0)
+        assert combo.itemData(0) is None
+        textos = [combo.itemText(i) for i in range(1, 4)]
+        assert textos[0].startswith("Volta 3"), textos
+        assert textos[1].startswith("Volta 2"), textos
+        assert textos[2].startswith("Volta 1"), textos
+        # itemData aponta para o índice real na lista de voltas concluídas
+        assert [combo.itemData(i) for i in range(1, 4)] == [2, 1, 0]
+
+        # Selecionar a primeira volta da lista abre a MAIS RECENTE (volta 3)
+        combo.setCurrentIndex(1)
+        app.processEvents()
+        assert not win.is_live
+        assert "3" in win.btn_live_state.text(), win.btn_live_state.text()
+
+        # Uma volta nova empurra as outras para baixo; a seleção continua na
+        # mesma volta 3, agora na posição 2
+        win.session_manager.completed_laps.append(fake_lap(4, "1:21.750"))
+        win.update_lap_selector_items()
+        app.processEvents()
+        assert combo.count() == 5
+        assert combo.itemText(1).startswith("Volta 4")
+        assert combo.currentIndex() == 2, combo.currentIndex()
+        assert combo.itemData(combo.currentIndex()) == 2
+
+        win.lap_selector.combo.setCurrentIndex(0)
+        app.processEvents()
+        assert win.is_live
+
+    check("seletor lista Ao Vivo e depois da volta mais recente para a mais antiga",
+          seletor_ordem_mais_recente_primeiro)
+
     def test_corner_analysis_panel():
         """
         Painel Curva a Curva: mapa manual da pista MOCK carregado, uma linha

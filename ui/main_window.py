@@ -387,9 +387,12 @@ class DashboardMainWindow(QMainWindow):
         # esmagado a ~300 px e as colunas S3/Tempo/Δ Best ficavam invisíveis,
         # e a unidade do vento aparecia cortada no painel da pista.
         # Somam 1484 px com os espaçamentos: cabe inteiro numa janela de 1500 px
+        # O painel de curvas precisa de ~195 px para mostrar as três colunas
+        # inteiras: com menos que isso, a coluna de delta — a que interessa —
+        # aparecia cortada ("+0.2…").
         MIN_W = {
-            "history": 360, "corners": 180, "gforce": 115, "weather": 140,
-            "session": 145, "assists": 140, "brakes": 190, "tires": 230,
+            "history": 360, "corners": 195, "gforce": 115, "weather": 140,
+            "session": 140, "assists": 140, "brakes": 190, "tires": 230,
         }
 
         cards = (self.gforce_card, self.weather_card, self.session_card,
@@ -551,35 +554,64 @@ class DashboardMainWindow(QMainWindow):
             self.lap_selector.combo.blockSignals(False)
             self.lap_selector._update_nav_buttons()
 
+    def _combo_lap_index(self, combo_idx: int):
+        """
+        Índice em `completed_laps` para uma posição do combo (None = Ao Vivo).
+
+        A posição no combo NÃO é o índice da volta: a lista é exibida da volta
+        mais recente para a mais antiga, então cada item carrega o índice real
+        em `itemData`.
+        """
+        if combo_idx <= 0:
+            return None
+        data = self.lap_selector.combo.itemData(combo_idx)
+        return data if isinstance(data, int) else None
+
     def update_lap_selector_items(self):
+        """
+        Preenche o seletor: "Ao Vivo" primeiro e, abaixo, as voltas concluídas
+        da mais recente para a mais antiga — a volta que você acabou de fazer é
+        a que você quer abrir, e ela fica sempre no topo da lista.
+        """
         if not hasattr(self, 'lap_selector'): return
         completed = self.session_manager.completed_laps
-        target_count = len(completed) + 1
-        if self.lap_selector.combo.count() == target_count:
-            for i, lap in enumerate(completed, start=1):
-                num = lap.get("lap_number", i)
-                t_str = lap.get("lap_time_str", "--:--.---")
-                item_text = f"Volta {num} — {t_str}"
-                if self.lap_selector.combo.itemText(i) != item_text:
-                    self.lap_selector.combo.setItemText(i, item_text)
+        combo = self.lap_selector.combo
+
+        items = []
+        for i in range(len(completed) - 1, -1, -1):
+            lap = completed[i]
+            num = lap.get("lap_number", i + 1)
+            t_str = lap.get("lap_time_str", "--:--.---")
+            items.append((f"Volta {num} — {t_str}", i))
+
+        # Mesma quantidade: só acerta textos e dados (o tempo da volta pode
+        # chegar depois do item ter sido criado)
+        if combo.count() == len(items) + 1:
+            for pos, (text, lap_i) in enumerate(items, start=1):
+                if combo.itemText(pos) != text:
+                    combo.setItemText(pos, text)
+                if combo.itemData(pos) != lap_i:
+                    combo.setItemData(pos, lap_i)
             return
 
-        curr_idx = self.lap_selector.combo.currentIndex()
-        self.lap_selector.combo.blockSignals(True)
-        self.lap_selector.combo.clear()
-        self.lap_selector.combo.addItem("Volta Atual (Ao Vivo)")
+        prev_lap_i = self._combo_lap_index(combo.currentIndex())
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Volta Atual (Ao Vivo)", None)
+        for text, lap_i in items:
+            combo.addItem(text, lap_i)
 
-        for i, lap in enumerate(completed, start=1):
-            num = lap.get("lap_number", i)
-            t_str = lap.get("lap_time_str", "--:--.---")
-            self.lap_selector.combo.addItem(f"Volta {num} — {t_str}")
+        # Uma volta nova empurra todas as outras uma posição para baixo; a
+        # seleção acompanha a MESMA volta, não a mesma posição da lista.
+        new_pos = 0
+        if prev_lap_i is not None:
+            for pos in range(1, combo.count()):
+                if combo.itemData(pos) == prev_lap_i:
+                    new_pos = pos
+                    break
+        combo.setCurrentIndex(new_pos)
 
-        if curr_idx < self.lap_selector.combo.count():
-            self.lap_selector.combo.setCurrentIndex(curr_idx)
-        else:
-            self.lap_selector.combo.setCurrentIndex(0)
-
-        self.lap_selector.combo.blockSignals(False)
+        combo.blockSignals(False)
         self.lap_selector._update_nav_buttons()
 
     def on_selected_lap_changed(self, idx: int):
@@ -590,11 +622,12 @@ class DashboardMainWindow(QMainWindow):
 
         self.is_live = False
         completed = self.session_manager.completed_laps
-        if idx - 1 >= len(completed):
+        lap_i = self._combo_lap_index(idx)
+        if lap_i is None or lap_i >= len(completed):
             return
 
-        lap_info = completed[idx - 1]
-        lap_num = lap_info.get("lap_number", idx)
+        lap_info = completed[lap_i]
+        lap_num = lap_info.get("lap_number", lap_i + 1)
         self.btn_live_state.setText(f"[ 📊 VOLTA {lap_num} ]")
         self.btn_live_state.setStyleSheet(self.btn_live_state.styleSheet().replace("#ff3333", "#eedd82"))
 
@@ -818,9 +851,11 @@ class DashboardMainWindow(QMainWindow):
         completed = self.session_manager.completed_laps
         if not completed:
             return None, ""
-        idx = self.lap_selector.combo.currentIndex() if hasattr(self, "lap_selector") else 0
-        if idx > 0 and idx - 1 < len(completed):
-            lap = completed[idx - 1]
+        lap_i = None
+        if hasattr(self, "lap_selector"):
+            lap_i = self._combo_lap_index(self.lap_selector.combo.currentIndex())
+        if lap_i is not None and lap_i < len(completed):
+            lap = completed[lap_i]
         else:
             lap = completed[-1]
         return lap.get("telemetry", {}), lap.get("lap_time_str", "")

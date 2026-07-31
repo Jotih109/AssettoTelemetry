@@ -692,7 +692,9 @@ class LapSelectorCard(QWidget):
         self.btn_prev.setFont(T.f_title(9))
         self.btn_prev.setCursor(Qt.PointingHandCursor)
         self.btn_prev.setStyleSheet(btn_style)
-        self.btn_prev.setToolTip("Volta anterior")
+        # A lista vai da volta mais recente para a mais antiga, então subir
+        # nela (◄) é ir para uma volta MAIS recente
+        self.btn_prev.setToolTip("Volta mais recente")
 
         self.combo = QComboBox()
         self.combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
@@ -724,7 +726,7 @@ class LapSelectorCard(QWidget):
         self.btn_next.setFont(T.f_title(9))
         self.btn_next.setCursor(Qt.PointingHandCursor)
         self.btn_next.setStyleSheet(btn_style)
-        self.btn_next.setToolTip("Próxima volta")
+        self.btn_next.setToolTip("Volta mais antiga")
 
         self.btn_prev.clicked.connect(self._on_prev_clicked)
         self.btn_next.clicked.connect(self._on_next_clicked)
@@ -1010,7 +1012,9 @@ class SessionCard(BaseCard):
         self.row_pos, self.lbl_pos_v = T.channel_row("Posição", "--", "", value_size=11, label_size=10)
         self.row_laps, self.lbl_laps_v = T.channel_row("Volta", "--", "", value_size=11, label_size=10)
         self.row_left, self.lbl_left_v = T.channel_row("Restante", "--", "", value_size=11, label_size=10)
-        self.row_comp, self.lbl_comp_v = T.channel_row("Composto", "--", "", value_size=11, label_size=10)
+        # "Comp." em vez de "Composto": com o nome inteiro, o rótulo era
+        # cortado ("Compostc") assim que o valor era um composto de nome longo
+        self.row_comp, self.lbl_comp_v = T.channel_row("Comp.", "--", "", value_size=11, label_size=10)
         self.row_dmg, self.lbl_dmg_v = T.channel_row("Danos", "0", "%", value_size=11, label_size=10)
         for row in (self.row_pos, self.row_laps, self.row_left,
                     self.row_comp, self.row_dmg):
@@ -1045,7 +1049,13 @@ class SessionCard(BaseCard):
         self.lbl_left_v.setText(
             f"{int(left // 60)}:{int(left % 60):02d}" if left > 0 else "--")
 
-        self.lbl_comp_v.setText(state.tyre_compound or "--")
+        # O AC manda nomes longos ("Semislick (SM)"), que estouravam a linha e
+        # cobriam o rótulo. Quando o nome traz o código entre parênteses, é ele
+        # que aparece — é como o composto é chamado no box.
+        compound = (state.tyre_compound or "").strip()
+        if compound.endswith(")") and "(" in compound:
+            compound = compound[compound.rfind("(") + 1:-1].strip() or compound
+        self.lbl_comp_v.setText(compound or "--")
 
         dmg = state.car_damage
         self.lbl_dmg_v.setText(f"{dmg:.0f}")
@@ -1080,7 +1090,9 @@ class BrakesCard(BaseCard):
         grid.addWidget(self.b_rr, 1, 1)
         self.body.addLayout(grid)
 
-        self.row_bias, self.lbl_bias_v = T.channel_row("Brake Bias", "--", "%", value_size=14, label_size=11)
+        # "Bias" em vez de "Brake Bias": o painel já se chama FREIOS, e o nome
+        # inteiro empurrava o valor contra a borda do card
+        self.row_bias, self.lbl_bias_v = T.channel_row("Bias", "--", "%", value_size=14, label_size=11)
         self.body.addWidget(self.row_bias)
         self.body.addStretch()
         # Alias antigo
@@ -1090,7 +1102,9 @@ class BrakesCard(BaseCard):
         box = QFrame()
         box.setStyleSheet(T.inset_qss())
         vbox = QVBoxLayout(box)
-        vbox.setContentsMargins(8, 8, 8, 8)
+        # 6 px em vez de 8: temperatura de disco tem 3 dígitos ("180") e, com
+        # a margem larga, o primeiro dígito era cortado em janela estreita
+        vbox.setContentsMargins(6, 6, 6, 6)
         vbox.setSpacing(1)
 
         head = QHBoxLayout()
@@ -1382,12 +1396,16 @@ class LapHistoryTable(QTableWidget):
         self.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        # TEMPO e Δ BEST dividem a sobra: são as colunas que o piloto lê de
+        # longe, e as de setor já se ajustam ao conteúdo
         self.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.verticalHeader().setVisible(False)
         self.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
-        self.verticalHeader().setDefaultSectionSize(24)
+        # 20 px em vez de 24: cabem 7 voltas na faixa de 180 px do rodapé,
+        # em vez de 5, sem apertar a fonte de 9 pt
+        self.verticalHeader().setDefaultSectionSize(20)
         self.setEditTriggers(QTableWidget.NoEditTriggers)
         self.setSelectionMode(QTableWidget.NoSelection)
         self.setShowGrid(True)
@@ -1415,7 +1433,7 @@ class CornerAnalysisTable(QTableWidget):
     gasto na curva e o delta de tempo contra a volta de referência.
     """
 
-    HEADERS = ["CURVA", "TEMPO", "Δ T"]
+    HEADERS = ["CURVA", "TEMPO s", "Δ T s"]
 
     def __init__(self):
         super(CornerAnalysisTable, self).__init__(0, len(self.HEADERS))
@@ -1448,7 +1466,9 @@ class CornerAnalysisTable(QTableWidget):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.verticalHeader().setVisible(False)
         self.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
-        self.verticalHeader().setDefaultSectionSize(22)
+        # Pistas de verdade têm 10-20 curvas: cada pixel de linha economizado
+        # é uma curva a mais visível sem rolar
+        self.verticalHeader().setDefaultSectionSize(19)
         self.setEditTriggers(QTableWidget.NoEditTriggers)
         self.setSelectionMode(QTableWidget.NoSelection)
         self.setShowGrid(True)
@@ -1456,13 +1476,16 @@ class CornerAnalysisTable(QTableWidget):
 
     # -- helpers de formatação -------------------------------------------
 
+    # Sem o sufixo "s": o cabeçalho já diz que a coluna é tempo, e os dois
+    # caracteres economizados são o que fazia o delta aparecer cortado
+    # ("+0.2…") no painel estreito do rodapé.
     @staticmethod
     def _fmt_sec_time(value) -> str:
-        return "--" if value is None else f"{value:.3f}s"
+        return "--" if value is None else f"{value:.3f}"
 
     @staticmethod
     def _fmt_delta_t(value) -> str:
-        return "--" if value is None else f"{value:+.3f}s"
+        return "--" if value is None else f"{value:+.3f}"
 
     def _set(self, row: int, col: int, text: str, color: str = None):
         item = self.item(row, col)

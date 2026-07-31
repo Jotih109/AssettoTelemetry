@@ -55,7 +55,72 @@ def _read_json_safe(path: str):
         return None
 
 
+def parse_lap_time_ms(t_str: str) -> int:
+    """
+    Converte tempo de volta em milissegundos. Aceita dois formatos:
+        "m:ss.mmm"  — o que os providers enviam (ex: "1:23.456")
+        "m:ss:mmm"  — formato legado, com três dois-pontos
+    Devolve 0 para vazio, "--:--.---" ou qualquer coisa que não dê para ler.
+    """
+    try:
+        if not t_str or t_str.startswith("-"):
+            return 0
+        if "." in t_str:
+            min_sec, millis = t_str.rsplit(".", 1)
+            parts = min_sec.split(":")
+            minutes = int(parts[0]) if len(parts) >= 2 else 0
+            seconds = int(parts[-1])
+            return (minutes * 60 * 1000) + (seconds * 1000) + int(millis)
+        parts = t_str.split(":")
+        if len(parts) == 3:
+            return (int(parts[0]) * 60 * 1000) + (int(parts[1]) * 1000) + int(parts[2])
+    except (ValueError, IndexError):
+        pass
+    return 0
+
+
 from core.paths import get_app_dir
+
+#: Quantos quadros esperar pelo tempo oficial da volta depois de cruzar a linha.
+#: O AC zera o cronômetro da volta na hora, mas só publica o iLastTime alguns
+#: quadros depois — a volta que fechou só pode ser finalizada com ele em mão.
+#: 45 quadros ≈ 0,75 s a 60 Hz.
+LAP_TIME_WAIT_FRAMES = 45
+
+#: Uma volta só entra no histórico e só pode virar referência se tiver pelo
+#: menos isto de telemetria. Sem esse piso, o punhado de quadros gravado num
+#: teleporte/saída de box virava "melhor volta" e detonava o delta.
+MIN_LAP_POINTS = 20
+MIN_LAP_SPAN_S = 5.0
+
+
+def _is_plausible_lap(lap_data: dict) -> bool:
+    """Volta com telemetria suficiente para entrar no histórico."""
+    times = lap_data.get("times") or []
+    if len(times) < MIN_LAP_POINTS:
+        return False
+    return (max(times) - min(times)) >= MIN_LAP_SPAN_S
+
+
+def covers_full_lap(lap_data: dict, track_length: float = 0.0) -> bool:
+    """
+    A telemetria vai da linha de chegada até a linha de chegada?
+
+    Só uma volta inteira pode servir de referência: o delta é calculado
+    interpolando o tempo do fantasma NA MESMA DISTÂNCIA, e uma volta gravada
+    pela metade (app aberto no meio da volta, saída de box) não tem o que
+    comparar no trecho que falta.
+    """
+    distances = lap_data.get("distance") or []
+    if len(distances) < MIN_LAP_POINTS:
+        return False
+    first, last = distances[0], distances[-1]
+    if track_length and track_length > 0:
+        return first <= track_length * 0.05 and last >= track_length * 0.95
+    # Sem o comprimento da pista, o melhor palpite é o próprio traçado:
+    # começou perto do zero e andou bastante
+    return first <= max(50.0, last * 0.05) and last > 500.0
+
 
 class SessionManager:
     """
@@ -76,6 +141,10 @@ class SessionManager:
         self._last_time = ""
         self._best_time = ""
         self._last_sector_index = 0
+        # Volta que cruzou a linha e está esperando o tempo oficial do jogo
+        self._pending_lap = None
+        self._last_lap_number = 0
+        self._seen_first_frame = False
         self._lap_start_time_ms = 0
         self._current_sector_0_ms = 0
         self._current_sector_1_ms = 0
@@ -142,29 +211,19 @@ class SessionManager:
         # Exposto para a UI calcular os deltas de setor sem duplicar a lógica de seleção
         self.current_reference_sector_ms = reference_ghost.get("metadata", {}).get("sector_times_ms", [0, 0, 0])
 
-        # Converte string de tempo para milissegundos
-        # Aceita dois formatos:
-        #   "m:ss.mmm"  — formato enviado pelos providers (ex: "1:23.456")
-        #   "m:ss:mmm"  — formato legado com três dois-pontos
-        def parse_time_to_ms(t_str):
-            try:
-                if not t_str or t_str.startswith("-"):
-                    return 0
-                # Formato "m:ss.mmm"
-                if "." in t_str:
-                    min_sec, millis = t_str.rsplit(".", 1)
-                    parts = min_sec.split(":")
-                    minutes = int(parts[0]) if len(parts) >= 2 else 0
-                    seconds = int(parts[-1])
-                    return (minutes * 60 * 1000) + (seconds * 1000) + int(millis)
-                # Formato legado "m:ss:mmm"
-                parts = t_str.split(":")
-                if len(parts) == 3:
-                    return (int(parts[0]) * 60 * 1000) + (int(parts[1]) * 1000) + int(parts[2])
-            except Exception:
-                pass
-            return 0
-            
+        parse_time_to_ms = parse_lap_time_ms
+
+        # Primeiro quadro da sessão: absorve o que o jogo já traz sem tratar
+        # como volta concluída. Sem isso, o tempo de uma volta feita ANTES do
+        # app abrir era lido como "acabei de fechar uma volta" e virava uma
+        # linha fantasma no histórico.
+        if not self._seen_first_frame:
+            self._seen_first_frame = True
+            self._last_time = state.last_time
+            self._best_time = state.best_time
+            self._last_lap_number = state.lap_number
+            self._last_sector_index = state.sector_index
+
         time_sec = parse_time_to_ms(state.current_time) / 1000.0
         time_ms = int(time_sec * 1000)
         
@@ -173,10 +232,21 @@ class SessionManager:
         best_times = best_ghost_t.get("times", [])
         best_distances = best_ghost_t.get("distance", [])
         
-        if best_times and best_distances and len(best_times) == len(best_distances) and state.distance_traveled > 0 and time_sec > 0:
+        # O delta só existe onde a referência TEM dado. Fora da faixa de
+        # distância que ela cobre, extrapolar produzia números absurdos
+        # (dezenas de segundos): bastava a referência ser uma volta parcial —
+        # o app aberto no meio de uma volta, por exemplo — para o delta virar
+        # "-51 s" no começo da volta seguinte.
+        ref_covers_here = (
+            bool(best_distances)
+            and best_distances[0] <= state.distance_traveled <= best_distances[-1]
+        )
+
+        if (best_times and best_distances and len(best_times) == len(best_distances)
+                and state.distance_traveled > 0 and time_sec > 0 and ref_covers_here):
             import bisect
             idx = bisect.bisect_left(best_distances, state.distance_traveled)
-            
+
             if idx == 0:
                 ref_time = best_times[0]
             elif idx >= len(best_distances):
@@ -210,46 +280,48 @@ class SessionManager:
             self._last_sector_index = state.sector_index
         
         # 2. Checa Fim da Volta
+        #
+        # Um cruzamento de linha no AC dá DOIS sinais em quadros diferentes: o
+        # cronômetro da volta zera imediatamente e o iLastTime (tempo oficial)
+        # só aparece algumas dezenas de milissegundos depois. Tratar os dois
+        # como fim de volta fechava a volta duas vezes — a segunda com meia
+        # dúzia de pontos, que entrava no histórico e virava ghost de
+        # referência, jogando o delta para dezenas de segundos.
+        #
+        # Por isso o fechamento é em duas etapas: no primeiro sinal a volta é
+        # separada e a nova começa limpa; a finalização (S3, tempo, gravação)
+        # espera o tempo oficial chegar.
+        _NO_TIME = {"", "--:--.---"}
+        new_lap_time = (state.last_time not in _NO_TIME
+                        and state.last_time != self._last_time)
+
         lap_restarted = False
         if len(self.current_lap_data["times"]) > 0:
             if time_sec < self.current_lap_data["times"][-1] - 1.0:
                 lap_restarted = True
-                
-        _NO_TIME = {"", "--:--.---"}
-        if (state.last_time not in _NO_TIME and state.last_time != self._last_time) or lap_restarted:
-            # --- Fuel Consumption ---
-            if self._fuel_at_lap_start >= 0 and state.fuel >= 0:
-                consumed = self._fuel_at_lap_start - state.fuel
-                if 0.0 < consumed < 10.0:  # Sanity check: reasonable consumption
-                    self._fuel_consumption_history.append(consumed)
-                    # Keep only last 5 laps for rolling average
-                    self._fuel_consumption_history = self._fuel_consumption_history[-5:]
-                    self.avg_fuel_per_lap = sum(self._fuel_consumption_history) / len(self._fuel_consumption_history)
-            
-            # Fechou o S3
-            last_lap_ms = parse_time_to_ms(state.last_time)
-            if self._current_sector_0_ms > 0 and self._current_sector_1_ms > 0 and last_lap_ms > 0:
-                self.current_sector_times[2] = last_lap_ms - self._current_sector_0_ms - self._current_sector_1_ms
-            
-            self._update_ideal_lap(state, 2, self.current_sector_times[2])
 
-            # Salvar snapshot ANTES do reset (para a UI ler depois)
-            self.last_completed_sector_times = list(self.current_sector_times)
-            self.last_completed_lap_time_str = state.last_time
+        lap_number_advanced = (state.lap_number > 0 and self._last_lap_number > 0
+                               and state.lap_number != self._last_lap_number)
 
-            # Salvar a volta completa
-            self.save_lap(state)
-            self.reset_current_lap()
-            self._last_time = state.last_time
-            self._last_sector_index = state.sector_index
-            self._current_sector_0_ms = 0
-            self._current_sector_1_ms = 0
-            # Record fuel at start of NEW lap
-            self._fuel_at_lap_start = state.fuel
+        crossed_line = lap_restarted or lap_number_advanced or new_lap_time
+        if crossed_line and self._pending_lap is None:
+            self._begin_lap_close(state)
+
+        if self._pending_lap is not None:
+            self._pending_lap["frames"] += 1
+            if new_lap_time:
+                # Tempo oficial chegou: finaliza com o número certo
+                self._finish_lap_close(state, state.last_time)
+            elif self._pending_lap["frames"] >= LAP_TIME_WAIT_FRAMES:
+                # O jogo não publicou nada; finaliza com o que existe para não
+                # perder a telemetria da volta
+                self._finish_lap_close(state, state.last_time)
         elif self._fuel_at_lap_start < 0 and state.fuel > 0:
             # Initialize on first valid frame
             self._fuel_at_lap_start = state.fuel
-            
+
+        self._last_lap_number = state.lap_number
+
         # Grava dados da telemetria da volta atual
         self.current_lap_data["times"].append(time_sec)
         self.current_lap_data["distance"].append(state.distance_traveled)
@@ -268,7 +340,69 @@ class SessionManager:
         # pista ainda não tem mapeamento manual (|G lat| > 0.4g).
         self.current_lap_data["g_lat"].append(state.g_lat)
 
-    def _update_ideal_lap(self, state: TelemetryState, closed_sector: int, new_sector_time_ms: int):
+    def _begin_lap_close(self, state: TelemetryState):
+        """
+        Primeira etapa do fim de volta: separa a volta que fechou e começa a
+        nova do zero AGORA, para que nenhum ponto da volta nova seja gravado
+        na antiga (e vice-versa).
+        """
+        # --- Consumo de combustível da volta que fechou ---
+        if self._fuel_at_lap_start >= 0 and state.fuel >= 0:
+            consumed = self._fuel_at_lap_start - state.fuel
+            if 0.0 < consumed < 10.0:   # sanity check
+                self._fuel_consumption_history.append(consumed)
+                self._fuel_consumption_history = self._fuel_consumption_history[-5:]
+                self.avg_fuel_per_lap = (sum(self._fuel_consumption_history)
+                                         / len(self._fuel_consumption_history))
+
+        self._pending_lap = {
+            "data": self.current_lap_data,
+            "sector_times": list(self.current_sector_times),
+            "sector_0_ms": self._current_sector_0_ms,
+            "sector_1_ms": self._current_sector_1_ms,
+            # O número da volta que fechou é o do quadro ANTERIOR: neste o jogo
+            # já está contando a volta nova
+            "lap_number": self._last_lap_number or getattr(state, "lap_number", 0),
+            "frames": 0,
+        }
+
+        self.reset_current_lap()
+        self._last_sector_index = state.sector_index
+        self._current_sector_0_ms = 0
+        self._current_sector_1_ms = 0
+        self._fuel_at_lap_start = state.fuel
+
+    def _finish_lap_close(self, state: TelemetryState, lap_time_str: str):
+        """
+        Segunda etapa: com o tempo oficial em mão, fecha o S3, alimenta a volta
+        ideal, grava a volta e atualiza os ghosts.
+        """
+        pending = self._pending_lap
+        self._pending_lap = None
+        if pending is None:
+            return
+
+        lap_data = pending["data"]
+        sector_times = list(pending["sector_times"])
+
+        lap_ms = parse_lap_time_ms(lap_time_str)
+        if pending["sector_0_ms"] > 0 and pending["sector_1_ms"] > 0 and lap_ms > 0:
+            sector_times[2] = lap_ms - pending["sector_0_ms"] - pending["sector_1_ms"]
+
+        # Snapshot para a UI ler depois
+        self.last_completed_sector_times = list(sector_times)
+        self.last_completed_lap_time_str = lap_time_str
+
+        self._update_ideal_lap(state, 2, sector_times[2], lap_data=lap_data)
+
+        self.save_lap(state, lap_time_str=lap_time_str, lap_data=lap_data,
+                      sector_times=sector_times, lap_number=pending["lap_number"])
+
+        if lap_time_str not in ("", "--:--.---"):
+            self._last_time = lap_time_str
+
+    def _update_ideal_lap(self, state: TelemetryState, closed_sector: int,
+                          new_sector_time_ms: int, lap_data: dict = None):
         if closed_sector < 0 or closed_sector > 2 or new_sector_time_ms <= 0:
             return
             
@@ -325,8 +459,10 @@ class SessionManager:
                     new_telemetry["car_z"].append(old_t.get("car_z", [0.0]*len(old_t["times"]))[i])
                     new_telemetry["g_lat"].append(old_t.get("g_lat", [0.0]*len(old_t["times"]))[i])
 
-            # Injeta os dados da volta ATUAL que pertencem ao closed_sector
-            curr_t = self.current_lap_data
+            # Injeta os dados da volta que fechou o setor. No fim da volta essa
+            # não é mais a volta atual (que já começou limpa), e sim a que
+            # acabou de ser separada — por isso `lap_data`.
+            curr_t = lap_data if lap_data is not None else self.current_lap_data
             for i in range(len(curr_t["times"])):
                 if curr_t["sector"][i] == closed_sector:
                     new_telemetry["times"].append(curr_t["times"][i])
@@ -354,32 +490,60 @@ class SessionManager:
             os.makedirs(folder_path, exist_ok=True)
             _write_json_atomic(ideal_path, ideal_data)
  
-    def save_lap(self, state: TelemetryState, manual=False):
-        if len(self.current_lap_data["times"]) == 0: return
+    def save_lap(self, state: TelemetryState, manual=False, lap_time_str: str = None,
+                 lap_data: dict = None, sector_times: list = None,
+                 lap_number: int = None):
+        """
+        Grava uma volta e atualiza histórico e ghosts.
+
+        Os parâmetros opcionais existem para o fim de volta em duas etapas: a
+        volta que fechou não é mais `current_lap_data` quando o tempo oficial
+        chega, e o número dela é o do quadro anterior ao cruzamento.
+        """
+        if lap_data is None:
+            lap_data = self.current_lap_data
+        if sector_times is None:
+            sector_times = self.current_sector_times
+        if len(lap_data["times"]) == 0: return
         track, car = self._clean_folder_names(state.track_name.strip(), state.car_name.strip())
         if not self._is_identified(track, car):
             print("[SessionManager] Volta descartada: pista/carro ainda não identificados "
                   f"({track} / {car}).")
             return
+
+        plausible = _is_plausible_lap(lap_data)
+        if not plausible:
+            # Um punhado de quadros não é uma volta: não entra no histórico nem
+            # pode virar referência (era isso que estourava o delta). A gravação
+            # em disco continua, para não perder nada que possa ser útil.
+            print(f"[SessionManager] Volta curta demais para o histórico "
+                  f"({len(lap_data['times'])} pontos): fica só no arquivo.")
+
         folder_path = os.path.join(self.data_dir, track, car)
         os.makedirs(folder_path, exist_ok=True)
-        
-        lap_time_str = state.last_time if not manual else state.current_time
+
+        if lap_time_str is None:
+            lap_time_str = state.last_time if not manual else state.current_time
         now = datetime.now()
         safe_lap_time = lap_time_str.replace(":", "-")
         filename = f"{now.strftime('%Y-%m-%d_%H-%M')}_{safe_lap_time}.json"
-        
+
+        full_lap = covers_full_lap(lap_data, getattr(state, "track_length", 0.0))
+
         data_to_save = {
             "metadata": {
                 "track": track, "car": car,
                 "lap_time_str": lap_time_str,
-                "sector_times_ms": self.current_sector_times,
+                "sector_times_ms": list(sector_times),
                 "timestamp": now.isoformat(),
-                "manual_save": manual
+                "manual_save": manual,
+                # Marca se a telemetria cobre a volta inteira — quem lê o
+                # arquivo depois sabe se pode usá-la como referência
+                "full_lap": full_lap,
             },
-            "telemetry": self.current_lap_data
+            "telemetry": lap_data
         }
-        
+
         _write_json_atomic(os.path.join(folder_path, filename), data_to_save)
             
         def ms_to_str(ms):
@@ -391,45 +555,47 @@ class SessionManager:
                 return f"{m}:{s:02d}.{mls:03d}"
             return f"{s}.{mls:03d}"
             
+        if not plausible:
+            return
+
+        if lap_number is None:
+            lap_number = getattr(state, "lap_number", len(self.historic_laps) + 1)
+
         self.historic_laps.append({
-            "lap_number": getattr(state, "lap_number", len(self.historic_laps) + 1),
-            "s1": ms_to_str(self.current_sector_times[0]),
-            "s2": ms_to_str(self.current_sector_times[1]),
-            "s3": ms_to_str(self.current_sector_times[2]),
+            "lap_number": lap_number,
+            "s1": ms_to_str(sector_times[0]),
+            "s2": ms_to_str(sector_times[1]),
+            "s3": ms_to_str(sector_times[2]),
             "total_time": lap_time_str
         })
 
         self.completed_laps.append({
-            "lap_number": getattr(state, "lap_number", len(self.completed_laps) + 1),
+            "lap_number": lap_number,
             "lap_time_str": lap_time_str,
             "metadata": copy.deepcopy(data_to_save["metadata"]),
             "telemetry": copy.deepcopy(data_to_save["telemetry"])
         })
-        
-        # Salva o Session Best na memória
-        def lap_time_to_ms(lap_str):
-            try:
-                parts = lap_str.split(":")
-                if len(parts) == 2:
-                    m = int(parts[0])
-                    s_ms = parts[1].split(".")
-                    s = int(s_ms[0])
-                    ms = int(s_ms[1]) if len(s_ms) > 1 else 0
-                    return m * 60000 + s * 1000 + ms
-            except Exception:
-                pass
-            return 9999999
-        
-        current_lap_ms = lap_time_to_ms(lap_time_str)
+
+        # Salva o Session Best na memória. Tempo ilegível conta como "infinito",
+        # para nunca ganhar a comparação.
+        current_lap_ms = parse_lap_time_ms(lap_time_str) or 9999999
         session_best_str = self.session_best_lap_ghost["metadata"].get("lap_time_str", "")
-        session_best_ms = lap_time_to_ms(session_best_str) if session_best_str else 9999999
-        
-        # Validar Best Lap: deve ter mais de 30 segundos (30000ms) para evitar lapsos/saídas dos boxes.
-        if 30000 < current_lap_ms < session_best_ms:
+        session_best_ms = (parse_lap_time_ms(session_best_str) or 9999999) if session_best_str else 9999999
+
+        # Validar Best Lap: mais de 30 segundos (evita lapsos/saídas de box) E
+        # telemetria da volta inteira (senão o delta não tem com o que comparar).
+        is_real_lap_time = current_lap_ms > 30000 and full_lap
+        if is_real_lap_time and current_lap_ms < session_best_ms:
             # Novo session best
             self.session_best_lap_ghost = copy.deepcopy(data_to_save)
-        
-        if state.best_time != self._best_time or manual:
+
+        # O ghost de Personal Best sobrescreve um arquivo em disco: só uma volta
+        # com tempo de volta de verdade e telemetria inteira pode fazer isso.
+        # `pb_missing` é a auto-cura: quando não há PB em disco — ou quando o
+        # que havia foi recusado na leitura por estar incompleto — a próxima
+        # volta boa assume o posto, sem precisar bater o recorde do jogo.
+        pb_missing = not self.best_lap_ghost.get("telemetry", {}).get("times")
+        if is_real_lap_time and (state.best_time != self._best_time or manual or pb_missing):
             self._best_time = state.best_time
             self.best_lap_ghost = copy.deepcopy(data_to_save)
             _write_json_atomic(os.path.join(folder_path, "best_lap_ghost.json"), data_to_save)
@@ -446,6 +612,17 @@ class SessionManager:
         
         loaded = False
         best_data = _read_json_safe(best_path) if os.path.exists(best_path) else None
+        # Um PB gravado por versão anterior pode conter uma volta pela metade
+        # (o app tinha sido aberto no meio de uma volta). Como referência ela
+        # não serve: recusar aqui é o que faz o app se curar sozinho na próxima
+        # volta boa, em vez de mostrar delta sem sentido para sempre.
+        if (best_data is not None and "telemetry" in best_data
+                and best_data["telemetry"].get("distance")
+                and not covers_full_lap(best_data["telemetry"],
+                                        getattr(state, "track_length", 0.0))):
+            print("[SessionManager] Personal Best em disco cobre só parte da volta: "
+                  "descartado (a próxima volta completa toma o lugar).")
+            best_data = None
         if best_data is not None and "telemetry" in best_data:
             self.best_lap_ghost = best_data
             loaded = True

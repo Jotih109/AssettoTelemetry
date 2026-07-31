@@ -690,8 +690,12 @@ class DashboardMainWindow(QMainWindow):
 
         import bisect
         deltas = []
+        # Fora da faixa de distância coberta pela referência não existe delta:
+        # extrapolar o primeiro/último ponto do fantasma inventava dezenas de
+        # segundos quando a referência era uma volta parcial.
+        ref_first, ref_last = ref_distances[0], ref_distances[-1]
         for t, d in zip(times, distances):
-            if d <= 0 or t <= 0:
+            if d <= 0 or t <= 0 or d < ref_first or d > ref_last:
                 deltas.append(0.0)
                 continue
             idx = bisect.bisect_left(ref_distances, d)
@@ -857,7 +861,14 @@ class DashboardMainWindow(QMainWindow):
         if lap_i is not None and lap_i < len(completed):
             lap = completed[lap_i]
         else:
+            # No modo ao vivo, a última volta INTEIRA. Uma volta parcial (app
+            # aberto no meio dela) daria uma tabela toda "--", porque a maioria
+            # das curvas não tem telemetria.
             lap = completed[-1]
+            for candidate in reversed(completed):
+                if candidate.get("metadata", {}).get("full_lap") is not False:
+                    lap = candidate
+                    break
         return lap.get("telemetry", {}), lap.get("lap_time_str", "")
 
     def _update_corner_analysis(self):

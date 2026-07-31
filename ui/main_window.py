@@ -388,8 +388,8 @@ class DashboardMainWindow(QMainWindow):
         # e a unidade do vento aparecia cortada no painel da pista.
         # Somam 1484 px com os espaçamentos: cabe inteiro numa janela de 1500 px
         MIN_W = {
-            "history": 410, "corners": 210, "gforce": 140, "weather": 150,
-            "session": 155, "assists": 150, "brakes": 200, "tires": 240,
+            "history": 310, "corners": 185, "gforce": 135, "weather": 145,
+            "session": 150, "assists": 145, "brakes": 195, "tires": 235,
         }
 
         cards = (self.gforce_card, self.weather_card, self.session_card,
@@ -407,9 +407,9 @@ class DashboardMainWindow(QMainWindow):
         footer_layout.setSpacing(4)
 
         history_panel.setMinimumWidth(MIN_W["history"])
-        footer_layout.addWidget(history_panel, stretch=4)
+        footer_layout.addWidget(history_panel, stretch=2)
         self.corner_panel.setMinimumWidth(MIN_W["corners"])
-        footer_layout.addWidget(self.corner_panel, stretch=2)
+        footer_layout.addWidget(self.corner_panel, stretch=1)
         for key, card in (("gforce", self.gforce_card), ("weather", self.weather_card),
                           ("session", self.session_card), ("assists", self.assists_card),
                           ("brakes", self.brakes_card), ("tires", self.tire_card)):

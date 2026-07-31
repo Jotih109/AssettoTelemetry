@@ -14,7 +14,7 @@ import collections
 from PyQt5.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
     QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView, QWidget, QComboBox, QSizePolicy,
-    QSpacerItem, QPushButton
+    QSpacerItem, QPushButton, QListWidget, QListWidgetItem
 )
 from PyQt5.QtCore import Qt, QPointF
 from PyQt5.QtGui import QFont, QColor, QPainter, QPen, QPolygonF
@@ -506,8 +506,11 @@ class AssistLED(QWidget):
         self.pill.setFont(QFont(T.FONT_MONO, 11, QFont.Bold))
         self.pill.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.pill.setFixedHeight(34)
-        self.pill.setMinimumWidth(60)
         self.set_state(is_equipped=True, is_active=False)
+        # O mínimo sai do próprio texto: com 60 px fixos, os rótulos longos
+        # apareciam cortados ("I AB", "I KER") quando o rodapé apertava.
+        # `set_state` só troca I por 0, então a largura não muda depois.
+        self.pill.setMinimumWidth(max(60, self.pill.sizeHint().width()))
         layout.addWidget(self.pill)
 
     def set_state(self, is_equipped: bool = True, is_active: bool = False, color: str = ""):
@@ -1424,6 +1427,160 @@ class LapHistoryTable(QTableWidget):
                 if item:
                     item.setBackground(QColor("#12241a"))
                     item.setForeground(QColor(T.OK))
+
+class EngineerPanel(BaseCard):
+    """
+    Painel do Engenheiro de Pista.
+
+    Uma lista de recados, o mais recente no topo, com a cor indicando a
+    urgência. O seletor de modo decide QUANDO o engenheiro fala:
+
+        Fim de volta — o balanço da volta que acabou (padrão)
+        Ao vivo      — avisos com o carro na pista (roda travando, pneu, bandeira)
+        Sob demanda  — só quando você clica em ANALISAR
+
+    O botão de voz liga/desliga a fala sem apagar o texto.
+    """
+
+    MODE_LAP = 0
+    MODE_LIVE = 1
+    MODE_MANUAL = 2
+
+    MAX_MESSAGES = 40
+
+    SEVERITY_COLORS = {
+        "critico": T.BAD,
+        "atencao": T.WARN,
+        "info": T.TXT_LABEL,
+    }
+    SEVERITY_MARKS = {"critico": "!!", "atencao": "! ", "info": "  "}
+
+    def __init__(self):
+        super(EngineerPanel, self).__init__(title="Engenheiro", margins=(4, 4, 4, 4),
+                                            spacing=3)
+
+        control_row = QHBoxLayout()
+        control_row.setContentsMargins(0, 0, 0, 0)
+        control_row.setSpacing(3)
+
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItems(["Fim de volta", "Ao vivo", "Sob demanda"])
+        self.combo_mode.setToolTip("Quando o engenheiro deve falar")
+        self.combo_mode.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {T.BG_INSET}; color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER}; border-radius: 0px;
+                padding: 2px 6px; font-family: "{T.FONT_UI}"; font-size: 11px;
+            }}
+            QComboBox:hover {{ border: 1px solid #3d454c; }}
+            QComboBox::drop-down {{ border: none; width: 14px; }}
+            QComboBox QAbstractItemView {{
+                background-color: {T.BG_PANEL}; color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER};
+                selection-background-color: {T.BG_HEADER};
+                font-size: 11px; outline: none;
+            }}
+        """)
+
+        btn_style = f"""
+            QPushButton {{
+                background-color: {T.BG_INSET}; color: {T.TXT_LABEL};
+                border: 1px solid {T.BORDER}; border-radius: 0px;
+                padding: 2px 6px; font-family: "{T.FONT_UI}";
+                font-size: 10px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: {T.BG_HEADER}; color: {T.TXT_VALUE}; }}
+            QPushButton:checked {{ color: {T.OK}; border: 1px solid {T.OK}; }}
+            QPushButton:disabled {{ color: #4a5157; border-color: {T.BORDER_SOFT}; }}
+        """
+
+        self.btn_voice = QPushButton("VOZ")
+        self.btn_voice.setCheckable(True)
+        self.btn_voice.setChecked(True)
+        self.btn_voice.setCursor(Qt.PointingHandCursor)
+        self.btn_voice.setStyleSheet(btn_style)
+        self.btn_voice.setToolTip("Liga/desliga a fala (o texto continua)")
+
+        self.btn_analyze = QPushButton("ANALISAR")
+        self.btn_analyze.setCursor(Qt.PointingHandCursor)
+        self.btn_analyze.setStyleSheet(btn_style)
+        self.btn_analyze.setToolTip("Analisa agora a volta exibida nos gráficos")
+
+        control_row.addWidget(self.combo_mode, stretch=1)
+        control_row.addWidget(self.btn_voice)
+        control_row.addWidget(self.btn_analyze)
+        self.body.addLayout(control_row)
+
+        self.list_messages = QListWidget()
+        self.list_messages.setWordWrap(True)
+        self.list_messages.setSelectionMode(QListWidget.NoSelection)
+        self.list_messages.setFocusPolicy(Qt.NoFocus)
+        self.list_messages.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list_messages.setStyleSheet(f"""
+            QListWidget {{
+                background-color: {T.BG_INSET};
+                border: 1px solid {T.BORDER_SOFT}; border-radius: 0px;
+                font-family: "{T.FONT_UI}"; font-size: 11px;
+                outline: none;
+            }}
+            QListWidget::item {{ padding: 2px 3px; border: none; }}
+        """)
+        self.body.addWidget(self.list_messages, stretch=1)
+
+        self._empty_hint()
+
+    # -- estado -----------------------------------------------------------
+
+    @property
+    def mode(self) -> int:
+        return self.combo_mode.currentIndex()
+
+    @property
+    def voice_on(self) -> bool:
+        return self.btn_voice.isChecked()
+
+    def _empty_hint(self):
+        self.list_messages.clear()
+        item = QListWidgetItem("Aguardando a primeira volta...")
+        item.setForeground(QColor(T.TXT_DIM))
+        self.list_messages.addItem(item)
+        self._has_messages = False
+
+    # -- API --------------------------------------------------------------
+
+    def add_advice(self, advice, prefix: str = ""):
+        """Insere um recado no topo da lista."""
+        if not getattr(self, "_has_messages", False):
+            self.list_messages.clear()
+            self._has_messages = True
+
+        mark = self.SEVERITY_MARKS.get(advice.severity, "  ")
+        texto = f"{mark} {prefix}{advice.display}" if prefix else f"{mark} {advice.display}"
+        item = QListWidgetItem(texto)
+        item.setForeground(QColor(self.SEVERITY_COLORS.get(advice.severity, T.TXT_VALUE)))
+        item.setToolTip(advice.display)
+        self.list_messages.insertItem(0, item)
+
+        while self.list_messages.count() > self.MAX_MESSAGES:
+            self.list_messages.takeItem(self.list_messages.count() - 1)
+        self.list_messages.scrollToTop()
+
+    def add_separator(self, texto: str):
+        """Cabeçalho de bloco, tipo 'VOLTA 12 — 1:29.305'."""
+        if not getattr(self, "_has_messages", False):
+            self.list_messages.clear()
+            self._has_messages = True
+        item = QListWidgetItem(texto.upper())
+        item.setForeground(QColor(T.TXT_TITLE))
+        f = item.font()
+        f.setBold(True)
+        item.setFont(f)
+        self.list_messages.insertItem(0, item)
+        self.list_messages.scrollToTop()
+
+    def clear_messages(self):
+        self._empty_hint()
+
 
 class CornerAnalysisTable(QTableWidget):
     """

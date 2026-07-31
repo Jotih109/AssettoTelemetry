@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from PyQt5.QtWidgets import QApplication
 
 import ui.main_window as mw
+from ui.components import EngineerPanel
 from core.engine import TelemetryEngine
 from providers.mock import MockTelemetryProvider
 
@@ -404,6 +405,108 @@ try:
         assert tc_data is not None and len(tc_data) > 0
 
     check("ABS e TC com destaque nas curvas e eletrônica 1/0", test_abs_and_electronics_status)
+
+    def test_engineer_panel():
+        """
+        Painel do Engenheiro: os três modos, o botão de voz e o ANALISAR.
+
+        A voz é substituída por uma dublê que só anota o que seria falado, para
+        o teste não fazer barulho nem depender do SAPI.
+        """
+        faladas = []
+        real_voice = win.voice
+
+        class VozFalsa:
+            enabled = True
+            def say(self, texto): faladas.append(texto)
+            def clear(self): faladas.clear()
+            def stop(self): pass
+
+        win.voice = VozFalsa()
+        try:
+            painel = win.engineer_panel
+
+            # --- Modo "Ao vivo": problema no carro gera recado e fala ---
+            painel.combo_mode.setCurrentIndex(painel.MODE_LIVE)
+            painel.btn_voice.setChecked(True)
+            st = provider.get_state()
+            st.abs_intervention = 0.9
+            st.tyre_temp = [120.0, 85.0, 85.0, 85.0]
+            st.flag = "AMARELA"
+            win.engineer.reset()
+            win._engineer_clock = 1000.0
+            win._engineer_live_tick(st)
+            app.processEvents()
+            assert painel.list_messages.count() >= 3, painel.list_messages.count()
+            assert faladas, "nada foi falado no modo ao vivo"
+            # O mais grave (bandeira/pneu crítico) é o que vai para a voz
+            assert "amarela" in faladas[0].lower() or "superaquecido" in faladas[0].lower(), faladas
+
+            # --- Botão de voz desliga a fala, mas não o texto ---
+            faladas.clear()
+            painel.btn_voice.setChecked(False)
+            win.engineer.reset()
+            win._engineer_clock = 2000.0
+            antes = painel.list_messages.count()
+            win._engineer_live_tick(st)
+            app.processEvents()
+            assert painel.list_messages.count() > antes, "texto parou junto com a voz"
+            assert not faladas, f"falou com a voz desligada: {faladas}"
+
+            # --- Modo "Sob demanda": telemetria não gera recado sozinha ---
+            painel.combo_mode.setCurrentIndex(painel.MODE_MANUAL)
+            win.engineer.reset()
+            win._engineer_clock = 3000.0
+            antes = painel.list_messages.count()
+            win._engineer_live_tick(st)
+            win._engineer_lap_report(st)
+            app.processEvents()
+            assert painel.list_messages.count() == antes, "falou sem ser chamado"
+
+            # --- ...mas o botão ANALISAR funciona em qualquer modo ---
+            painel.btn_voice.setChecked(True)
+            faladas.clear()
+            win.engineer.reset()
+            win._engineer_clock = 4000.0
+            painel.btn_analyze.click()
+            app.processEvents()
+            assert painel.list_messages.count() > antes, "ANALISAR não produziu nada"
+
+            # --- Modo "Fim de volta": o balanço sai ao fechar a volta ---
+            painel.combo_mode.setCurrentIndex(painel.MODE_LAP)
+            win.engineer.reset()
+            win._engineer_clock = 5000.0
+            antes = painel.list_messages.count()
+            win._engineer_on_lap_completed(st)
+            app.processEvents()
+            assert painel.list_messages.count() > antes, "fim de volta não gerou balanço"
+        finally:
+            win.voice = real_voice
+            win.engineer_panel.combo_mode.setCurrentIndex(EngineerPanel.MODE_LAP)
+
+    check("painel do engenheiro (3 modos, voz e ANALISAR)", test_engineer_panel)
+
+    def test_engineer_survives_broken_data():
+        """
+        O engenheiro é auxiliar: se ele explodir, o dashboard não pode cair.
+        """
+        original = win.engineer.analyze_live
+
+        def explode(*a, **kw):
+            raise RuntimeError("falha proposital do engenheiro")
+
+        win.engineer.analyze_live = explode
+        win.engineer_panel.combo_mode.setCurrentIndex(win.engineer_panel.MODE_LIVE)
+        try:
+            for _ in range(20):     # passa do intervalo de 15 quadros
+                win.on_telemetry_update(provider.get_state())
+            app.processEvents()
+        finally:
+            win.engineer.analyze_live = original
+            win.engineer_panel.combo_mode.setCurrentIndex(EngineerPanel.MODE_LAP)
+
+    check("falha do engenheiro não derruba o dashboard",
+          test_engineer_survives_broken_data)
 
     def desconectado():
         from core.models import TelemetryState

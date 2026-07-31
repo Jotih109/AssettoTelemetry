@@ -1,2 +1,6 @@
 PyQt5>=5.15.10
 pyqtgraph>=0.13.7
+
+# Opcional — voz do Engenheiro de Pista (SAPI do Windows).
+# Sem isto o app funciona igual: o painel de texto continua, só nao fala.
+pywin32>=306; sys_platform == 'win32'

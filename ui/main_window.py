@@ -1,9 +1,11 @@
 import collections
 import os
+import time
 import traceback
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
     QPushButton, QSizePolicy, QSplitter, QProgressBar, QSlider, QScrollArea,
+    QTabWidget,
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QColor
@@ -18,10 +20,12 @@ from ui.sidebar_panel import SidebarPanel
 from ui.components import (
     TopMetricCard, SectorsCard, CustomPlot, LapHistoryTable, GhostSelectorCard, LapSelectorCard,
     GForceCard, WeatherCard, SessionCard, AssistsCard, BrakesCard, TireCard,
-    CornerAnalysisTable,
+    CornerAnalysisTable, EngineerPanel,
 )
 
 from core import corner_analysis as ca
+from core.race_engineer import RaceEngineer
+from core.voice import VoiceEngine
 from core.paths import get_app_dir
 
 # Auto-exporta uma imagem PNG da análise sempre que uma nova Melhor Volta (Best Lap)
@@ -62,6 +66,12 @@ class DashboardMainWindow(QMainWindow):
         self._corner_regions = []        # faixas sombreadas nos gráficos
         self._corner_comparisons = []
         self.show_corner_regions = True
+
+        # --- Engenheiro de pista ---
+        self.engineer = RaceEngineer()
+        self.voice = VoiceEngine(enabled=True)
+        self._engineer_last_lap_count = 0
+        self._engineer_clock = 0.0   # segundos desde o início da sessão
 
         self.init_ui()
         
@@ -373,9 +383,47 @@ class DashboardMainWindow(QMainWindow):
         self.corner_analysis_table = CornerAnalysisTable()
         self.corner_analysis_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.corner_analysis_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.corner_panel = T.Panel(title="Curva a curva", body_margins=(0, 0, 0, 0))
-        self.corner_panel.body.addWidget(self.corner_analysis_table)
-        self.corner_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        # Painel do Engenheiro de Pista — recados, seletor de modo e voz
+        self.engineer_panel = EngineerPanel()
+        self.engineer_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        # Dentro da aba, a faixa de título do card é redundante com o rótulo
+        # da própria aba — e no rodapé de 180 px cada pixel na vertical conta
+        self.engineer_panel.lbl_title.setVisible(False)
+        self.engineer_panel.setStyleSheet(
+            self.engineer_panel.styleSheet().replace(
+                f"border: 1px solid {T.BORDER};", "border: none;"))
+
+        # Curva a curva e Engenheiro são as duas leituras da MESMA volta e se
+        # olha uma por vez. Em abas, elas dividem uma coluna do rodapé em vez de
+        # disputar largura com os cards do carro — nove colunas não cabiam em
+        # 1900 px, e o resultado era "SESSÃO — PRACTIC" e o painel de pneus
+        # cortados na borda.
+        self.analysis_tabs = QTabWidget()
+        self.analysis_tabs.setDocumentMode(True)
+        # Rótulos curtos: os dois precisam caber na barra de abas de ~300 px,
+        # senão o Qt corta o texto e põe setas de rolagem
+        self.analysis_tabs.addTab(self.corner_analysis_table, "CURVAS")
+        self.analysis_tabs.addTab(self.engineer_panel, "ENGENHEIRO")
+        self.analysis_tabs.setStyleSheet(f"""
+            QTabWidget::pane {{
+                background-color: {T.BG_PANEL};
+                border: 1px solid {T.BORDER}; border-radius: 0px;
+            }}
+            QTabBar::tab {{
+                background-color: {T.BG_HEADER}; color: {T.TXT_TITLE};
+                border: 1px solid {T.BORDER}; border-bottom: none;
+                padding: 3px 10px; margin-right: 1px;
+                font-family: "{T.FONT_UI}"; font-size: 8pt; font-weight: bold;
+            }}
+            QTabBar::tab:selected {{
+                background-color: {T.BG_PANEL}; color: {T.TXT_VALUE};
+            }}
+            QTabBar::tab:hover {{ color: {T.TXT_VALUE}; }}
+        """)
+        self.engineer_panel.btn_analyze.clicked.connect(self.on_engineer_analyze_clicked)
+        self.engineer_panel.btn_voice.toggled.connect(self.on_engineer_voice_toggled)
+        self.engineer_panel.combo_mode.currentIndexChanged.connect(
+            self.on_engineer_mode_changed)
 
         self.gforce_card = GForceCard()
         self.weather_card = WeatherCard()
@@ -391,9 +439,18 @@ class DashboardMainWindow(QMainWindow):
         # O painel de curvas precisa de ~195 px para mostrar as três colunas
         # inteiras: com menos que isso, a coluna de delta — a que interessa —
         # aparecia cortada ("+0.2…").
+        # A coluna de análise (abas Curva a curva / Engenheiro) precisa de ~300 px:
+        # é o que faz o texto do engenheiro quebrar em linhas legíveis e a coluna
+        # de delta das curvas aparecer inteira.
+        # Freios, Pneus e Eletrônica ficam FORA daqui de propósito: o conteúdo
+        # deles (grade 2x2 com temperatura de 3 dígitos, pílulas "I KERS") já
+        # define uma largura mínima maior que qualquer número que eu escrevesse
+        # aqui — e um mínimo explícito MENOR sobrepõe o que o Qt calcula, que
+        # era o que fazia "FL 180 °C" e "I ABS" aparecerem com letra comida.
         MIN_W = {
-            "history": 360, "corners": 195, "gforce": 115, "weather": 140,
-            "session": 140, "assists": 140, "brakes": 190, "tires": 230,
+            # 165 na sessão porque o título dela carrega o tipo:
+            # "SESSÃO — PRACTICE" não cabia em 140 e virava "SESSÃO — PRACTIC"
+            "history": 360, "analise": 300, "weather": 140, "session": 165,
         }
 
         cards = (self.gforce_card, self.weather_card, self.session_card,
@@ -412,12 +469,13 @@ class DashboardMainWindow(QMainWindow):
 
         history_panel.setMinimumWidth(MIN_W["history"])
         footer_layout.addWidget(history_panel, stretch=3)
-        self.corner_panel.setMinimumWidth(MIN_W["corners"])
-        footer_layout.addWidget(self.corner_panel, stretch=1)
+        self.analysis_tabs.setMinimumWidth(MIN_W["analise"])
+        footer_layout.addWidget(self.analysis_tabs, stretch=3)
         for key, card in (("gforce", self.gforce_card), ("weather", self.weather_card),
                           ("session", self.session_card), ("assists", self.assists_card),
                           ("brakes", self.brakes_card), ("tires", self.tire_card)):
-            card.setMinimumWidth(MIN_W[key])
+            if key in MIN_W:
+                card.setMinimumWidth(MIN_W[key])
             footer_layout.addWidget(card, stretch=1)
         
         bottom_row_widget.setFixedHeight(180)
@@ -868,13 +926,16 @@ class DashboardMainWindow(QMainWindow):
         # os dois valores não batiam.
         self._corner_track_length = length or (cmap.track_length if cmap else 0.0)
 
+        # A contagem de curvas (e o aviso de mapa parcial) vai no rótulo da aba
         if self._corners:
-            titulo = f"CURVA A CURVA ({len(self._corners)})"
+            titulo = f"CURVAS ({len(self._corners)})"
             if cmap and cmap.is_provisional:
-                titulo += " — PARCIAL"
-            self.corner_panel.lbl_title.setText(titulo)
+                titulo += " PARCIAL"
         else:
-            self.corner_panel.lbl_title.setText("CURVA A CURVA")
+            titulo = "CURVAS"
+        self.analysis_tabs.setTabText(0, titulo)
+        self.analysis_tabs.setTabToolTip(
+            0, "Análise curva a curva: tempo no trecho e delta vs referência")
 
     def _corner_analysis_lap(self):
         """
@@ -1029,6 +1090,104 @@ class DashboardMainWindow(QMainWindow):
             self._update_corner_analysis()
 
     # -----------------------------------------------------------------------
+    # Engenheiro de pista
+    # -----------------------------------------------------------------------
+
+    def on_engineer_voice_toggled(self, checked: bool):
+        self.voice.enabled = checked
+        if not checked:
+            self.voice.clear()   # cala o que ainda não foi falado
+
+    def on_engineer_mode_changed(self, idx: int):
+        nomes = {EngineerPanel.MODE_LAP: "no fim de cada volta",
+                 EngineerPanel.MODE_LIVE: "ao vivo, durante a volta",
+                 EngineerPanel.MODE_MANUAL: "só quando você pedir"}
+        print(f"[Engenheiro] Modo: {nomes.get(idx, '?')}")
+
+    def on_engineer_analyze_clicked(self):
+        """Botão ANALISAR: roda o balanço da volta exibida, em qualquer modo."""
+        self._engineer_lap_report(self._last_state, forced=True)
+
+    def _engineer_emit(self, advices: list, header: str = "", speak_limit: int = 1):
+        """
+        Joga os recados no painel e fala os mais importantes.
+
+        A lista do painel cresce por cima, então a inserção é de trás para
+        frente: o recado mais importante acaba no topo, logo abaixo do
+        cabeçalho da volta.
+        """
+        if not advices:
+            return
+        for advice in reversed(advices):
+            self.engineer_panel.add_advice(advice)
+        if header:
+            self.engineer_panel.add_separator(header)
+
+        if not self.engineer_panel.voice_on or speak_limit <= 0:
+            return
+        now = self._engineer_clock
+        # O intervalo mínimo vale entre BLOCOS: as frases de um mesmo bloco vão
+        # para a fila e são ditas em sequência
+        if not self.engineer.should_speak(now):
+            return
+        for advice in self.engineer.pick_for_voice(advices, limit=speak_limit):
+            self.voice.say(advice.text)
+        self.engineer.mark_spoken(now)
+
+    def _reference_lap_time_str(self) -> str:
+        idx = self.ghost_selector.combo.currentIndex()
+        ghost = self._reference_ghost_for_index(idx)
+        return ghost.get("metadata", {}).get("lap_time_str", "") or ""
+
+    def _engineer_lap_report(self, state, forced: bool = False):
+        """
+        Balanço da volta: onde perdeu tempo, por quê e o que tentar.
+
+        `forced=True` vem do botão ANALISAR e ignora o modo selecionado.
+        """
+        if state is None:
+            return
+        if not forced and self.engineer_panel.mode != EngineerPanel.MODE_LAP:
+            return
+
+        telemetry, lap_time_str = self._corner_analysis_lap()
+        if not telemetry:
+            return
+
+        lap_ms = self._parse_time_ms(lap_time_str)
+        ref_ms = self._parse_time_ms(self._reference_lap_time_str())
+        lap_delta = ((lap_ms - ref_ms) / 1000.0
+                     if lap_ms > 0 and ref_ms > 0 else None)
+
+        advices = self.engineer.analyze_lap(
+            self._corner_comparisons, lap_telemetry=telemetry, state=state,
+            lap_time_str=lap_time_str, lap_delta_s=lap_delta)
+
+        if not advices:
+            return
+        header = f"Volta {lap_time_str}" if lap_time_str else "Volta"
+        # No fim de volta o piloto está na reta: dá para ouvir dois recados
+        self._engineer_emit(advices, header=header, speak_limit=2)
+
+    def _engineer_on_lap_completed(self, state):
+        """Chamado uma vez por volta concluída."""
+        self._engineer_lap_report(state)
+
+        # Consistência só existe na comparação entre voltas, então entra aqui
+        _, lap_time_str = self._corner_analysis_lap()
+        aviso = self.engineer.register_lap_time(self._parse_time_ms(lap_time_str))
+        if aviso and self.engineer_panel.mode != EngineerPanel.MODE_MANUAL:
+            self._engineer_emit([aviso], speak_limit=0)
+
+    def _engineer_live_tick(self, state):
+        """Avisos com o carro na pista, quando o modo é 'Ao vivo'."""
+        if self.engineer_panel.mode != EngineerPanel.MODE_LIVE:
+            return
+        advices = self.engineer.analyze_live(state, self._engineer_clock)
+        if advices:
+            self._engineer_emit(advices, speak_limit=1)
+
+    # -----------------------------------------------------------------------
     # Main telemetry update slot
     # -----------------------------------------------------------------------
 
@@ -1060,6 +1219,8 @@ class DashboardMainWindow(QMainWindow):
             return
 
         self._last_state = state
+        # Relógio do engenheiro: base dos tempos de espera entre recados
+        self._engineer_clock = time.monotonic()
 
         # 1. PROCESS STATE FIRST! This calculates Live Delta and Sectors,
         #    using whichever reference lap is currently selected in the sidebar.
@@ -1325,6 +1486,20 @@ class DashboardMainWindow(QMainWindow):
                 target_d = max_d * 1.2
                 self.plot_delta.setYRange(-target_d, target_d, padding=0)
             
+        # --- Engenheiro ao vivo -------------------------------------------
+        # A 60 Hz não faz sentido: os avisos têm tempo de espera de segundos.
+        # ~4 Hz já pega qualquer travamento de roda ou corte de TC.
+        self._engineer_frame_skip = (getattr(self, "_engineer_frame_skip", 0) + 1) % 15
+        if self._engineer_frame_skip == 0:
+            try:
+                self._engineer_live_tick(state)
+            except Exception:
+                if not getattr(self, "_engineer_failed", False):
+                    self._engineer_failed = True
+                    print("[Engenheiro] Falha na análise ao vivo; "
+                          "o dashboard continua normalmente:")
+                    traceback.print_exc()
+
         # --- Update Lap History dynamically by Lap ID ---
         self._update_live_lap_history(state)
         
@@ -1376,6 +1551,16 @@ class DashboardMainWindow(QMainWindow):
             self._update_best_map_base_trace()
             # Volta fechada: é o momento de reavaliar as curvas
             self._update_corner_analysis()
+            # ...e de o engenheiro dar o balanço dela (a tabela de curvas já
+            # está recalculada, é dela que sai o "onde" e o "por quê")
+            try:
+                self._engineer_on_lap_completed(state)
+            except Exception:
+                if not getattr(self, "_engineer_failed", False):
+                    self._engineer_failed = True
+                    print("[Engenheiro] Falha no balanço da volta; "
+                          "o dashboard continua normalmente:")
+                    traceback.print_exc()
 
             best_time_ms = 0
             best_row_idx = -1
@@ -1541,7 +1726,8 @@ class DashboardMainWindow(QMainWindow):
 
     def closeEvent(self, event):
         print("Parando Thread de Telemetria...")
-        self.engine.stop() 
+        self.engine.stop()
+        self.voice.stop()
         event.accept()
 
     def resizeEvent(self, event):

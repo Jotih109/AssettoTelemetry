@@ -80,6 +80,20 @@
 
 ---
 
+### 🎧 Engenheiro de Pista (análise por regras + voz)
+- **Diagnóstico, não só número:** lê as métricas curva a curva e diz o que fazer. Ex.: *"Ferradura: perdeu 0.42 segundos, freou 20 metros antes. Atrase a freada"*.
+- **100% local:** regras sobre a telemetria, sem serviço externo e sem modelo de linguagem — custo zero, resposta instantânea e número sempre exato (nunca inventado).
+- **Seletor de modo**, no próprio painel:
+  - **Fim de volta** — o balanço da volta que acabou (padrão).
+  - **Ao vivo** — avisos com o carro na pista: roda travando, TC cortando, pneu superaquecido, bandeira, penalidade, combustível.
+  - **Sob demanda** — nada aparece sem você clicar em **ANALISAR**.
+- **Texto e voz:** painel com histórico colorido por severidade (crítico / atenção / info) e fala pelo SAPI do Windows, preferindo automaticamente uma voz em português. O botão **VOZ** desliga a fala sem apagar o texto.
+- **Não metralha o piloto:** cada regra tem tempo de espera próprio, há intervalo mínimo entre falas, e só o essencial vai para a voz (o crítico + a curva onde mais se perdeu). O resto fica no painel.
+- **O que ele analisa:** perda de tempo por curva e a causa (ponto de frenagem, $V_{min}$, ponto de retomada), vício de ABS/TC ao longo da volta com a curva do pior ponto, câmber pela banda de rodagem, autonomia de combustível vs. voltas restantes, consistência entre as últimas voltas, temperatura de pneus e freios, clipping de force feedback.
+- **Fica calado quando está tudo bem** — é o comportamento mais testado da funcionalidade.
+
+---
+
 ### 🔀 Análise Curva a Curva (Turn-by-Turn)
 - **Painel dedicado no rodapé:** uma linha por curva da pista, com o valor medido na volta analisada e o delta contra a volta de referência selecionada. A curva onde mais tempo foi perdido fica destacada em vermelho.
 - **Métricas por curva:**
@@ -130,6 +144,8 @@ AssettoCorsa-Telemetry/
 │   ├── engine.py           # Thread a 60 Hz: leitura e emissão de sinais Qt
 │   ├── models.py           # TelemetryState — estrutura de dados padronizada
 │   ├── corner_analysis.py  # Análise Curva a Curva: mapas, detecção por G e métricas
+│   ├── race_engineer.py    # Engenheiro de pista: regras de diagnóstico e conselho
+│   ├── voice.py            # Voz do engenheiro (SAPI do Windows, opcional)
 │   ├── session_manager.py  # Gerenciamento de voltas, setores, ghosts e consumo
 │   └── storage.py          # Utilitários de gravação e leitura de dados
 ├── providers/
@@ -144,6 +160,7 @@ AssettoCorsa-Telemetry/
 ├── tests/
 │   ├── test_assettocorsa_provider.py  # Testes de unidade do provider do AC
 │   ├── test_corner_analysis.py        # Testes da análise curva a curva
+│   ├── test_race_engineer.py          # Testes das regras do engenheiro de pista
 │   ├── test_session_manager.py        # Testes de persistência e validação de ghosts
 │   └── test_ui_smoke.py               # Testes de fumaça da interface gráfica
 ├── track_maps/             # Mapeamento das curvas por pista (manual e detectado)
@@ -200,6 +217,7 @@ python tests/test_ui_smoke.py
 python tests/test_session_manager.py
 python tests/test_assettocorsa_provider.py
 python tests/test_corner_analysis.py
+python tests/test_race_engineer.py
 ```
 
 ---

@@ -94,13 +94,13 @@ class SessionManager:
                 "sector_times_ms": [0, 0, 0], "timestamp": ""
             },
             "telemetry": {
-                "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "abs_intervention": [], "tc_intervention": []
+                "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "abs_intervention": [], "tc_intervention": [], "g_lat": []
             }
         }
         
     def reset_current_lap(self):
         self.current_lap_data = {
-            "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "abs_intervention": [], "tc_intervention": []
+            "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "abs_intervention": [], "tc_intervention": [], "g_lat": []
         }
         self.current_sector_times = [0, 0, 0]
 
@@ -264,6 +264,9 @@ class SessionManager:
         self.current_lap_data["car_z"].append(state.car_z)
         self.current_lap_data["abs_intervention"].append(state.abs_intervention)
         self.current_lap_data["tc_intervention"].append(state.tc_intervention)
+        # Canal usado pela Análise Curva a Curva para detectar curvas quando a
+        # pista ainda não tem mapeamento manual (|G lat| > 0.4g).
+        self.current_lap_data["g_lat"].append(state.g_lat)
 
     def _update_ideal_lap(self, state: TelemetryState, closed_sector: int, new_sector_time_ms: int):
         if closed_sector < 0 or closed_sector > 2 or new_sector_time_ms <= 0:
@@ -303,7 +306,7 @@ class SessionManager:
             
             # SPLICING (Costura) da Telemetria
             # Manter os pontos que NÃO são do closed_sector
-            new_telemetry = {"times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "steer": [], "delta": [], "car_x": [], "car_z": []}
+            new_telemetry = {"times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "g_lat": []}
             
             # Copia os dados do ideal antigo que pertencem aos outros setores
             old_t = ideal_data["telemetry"]
@@ -320,7 +323,8 @@ class SessionManager:
                     new_telemetry["delta"].append(old_t.get("delta", [0.0]*len(old_t["times"]))[i])
                     new_telemetry["car_x"].append(old_t.get("car_x", [0.0]*len(old_t["times"]))[i])
                     new_telemetry["car_z"].append(old_t.get("car_z", [0.0]*len(old_t["times"]))[i])
-                    
+                    new_telemetry["g_lat"].append(old_t.get("g_lat", [0.0]*len(old_t["times"]))[i])
+
             # Injeta os dados da volta ATUAL que pertencem ao closed_sector
             curr_t = self.current_lap_data
             for i in range(len(curr_t["times"])):
@@ -336,7 +340,8 @@ class SessionManager:
                     new_telemetry["delta"].append(curr_t["delta"][i])
                     new_telemetry["car_x"].append(curr_t["car_x"][i])
                     new_telemetry["car_z"].append(curr_t["car_z"][i])
-                    
+                    new_telemetry["g_lat"].append(curr_t["g_lat"][i])
+
             # Reordenar por tempo (times)
             if len(new_telemetry["times"]) > 0:
                 sorted_indices = sorted(range(len(new_telemetry["times"])), key=lambda k: new_telemetry["times"][k])

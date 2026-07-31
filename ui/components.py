@@ -1403,6 +1403,155 @@ class LapHistoryTable(QTableWidget):
                     item.setBackground(QColor("#12241a"))
                     item.setForeground(QColor(T.OK))
 
+class CornerAnalysisTable(QTableWidget):
+    """
+    Tabela Curva a Curva (Turn-by-Turn), no espírito do relatório de curvas do i2.
+
+    Uma linha por curva da pista, com o valor medido na volta analisada e o
+    delta contra a volta de referência. O delta de tempo é a coluna que
+    interessa: é ela que diz onde o tempo foi perdido.
+    """
+
+    HEADERS = ["CURVA", "FREIO", "Δ FREIO", "V.MIN", "Δ V.MIN", "RETOMADA", "Δ T"]
+
+    def __init__(self):
+        super(CornerAnalysisTable, self).__init__(0, len(self.HEADERS))
+        self.setHorizontalHeaderLabels(self.HEADERS)
+        self.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {T.BG_PANEL};
+                color: {T.TXT_VALUE};
+                gridline-color: {T.BORDER_SOFT};
+                border: none;
+                border-radius: 0px;
+                font-family: "{T.FONT_MONO}";
+                font-size: 9pt;
+            }}
+            QTableWidget::item {{ padding: 2px 5px; }}
+            QHeaderView::section {{
+                background-color: {T.BG_HEADER};
+                color: {T.TXT_TITLE};
+                padding: 1px;
+                border: none;
+                border-bottom: 1px solid {T.BORDER};
+                font-family: "{T.FONT_UI}";
+                font-size: 8pt;
+                font-weight: bold;
+            }}
+        """)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.horizontalHeader().setStretchLastSection(True)
+        # São sete colunas: em janela estreita é melhor rolar do que cortar a
+        # coluna de delta de tempo, que é justamente a que interessa
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.verticalHeader().setVisible(False)
+        self.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.verticalHeader().setDefaultSectionSize(22)
+        self.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.setSelectionMode(QTableWidget.NoSelection)
+        self.setShowGrid(True)
+        self._worst_row = -1
+
+    # -- helpers de formatação -------------------------------------------
+
+    @staticmethod
+    def _fmt_m(value) -> str:
+        return "--" if value is None else f"{value:.0f}m"
+
+    @staticmethod
+    def _fmt_kmh(value) -> str:
+        return "--" if value is None else f"{value:.0f}"
+
+    @staticmethod
+    def _fmt_delta_m(value) -> str:
+        return "--" if value is None else f"{value:+.0f}m"
+
+    @staticmethod
+    def _fmt_delta_kmh(value) -> str:
+        return "--" if value is None else f"{value:+.1f}"
+
+    @staticmethod
+    def _fmt_delta_t(value) -> str:
+        return "--" if value is None else f"{value:+.3f}s"
+
+    def _set(self, row: int, col: int, text: str, color: str = None):
+        item = self.item(row, col)
+        if item is None:
+            item = QTableWidgetItem(text)
+            item.setTextAlignment(Qt.AlignCenter)
+            self.setItem(row, col, item)
+        elif item.text() != text:
+            item.setText(text)
+        item.setForeground(QColor(color or T.TXT_VALUE))
+
+    def update_corners(self, comparisons: list):
+        """
+        Redesenha a tabela a partir de uma lista de
+        `core.corner_analysis.CornerComparison`.
+        """
+        if self.rowCount() != len(comparisons):
+            self.setRowCount(len(comparisons))
+            self._worst_row = -1
+
+        worst_row, worst_loss = -1, 0.0
+
+        for row, cmp_ in enumerate(comparisons):
+            corner = cmp_.corner
+            label = f"{corner.index:>2} {corner.name}"
+            if corner.direction:
+                label += f" ({corner.direction})"
+            self._set(row, 0, label, T.TXT_LABEL)
+
+            self._set(row, 1, self._fmt_m(cmp_.lap.braking_point_m))
+            # Freou mais fundo que a referência (+) é o lado bom aqui
+            d_brake = cmp_.delta_braking_m
+            self._set(row, 2, self._fmt_delta_m(d_brake),
+                      self._color_for(d_brake, higher_is_better=True))
+
+            self._set(row, 3, self._fmt_kmh(cmp_.lap.v_min))
+            d_vmin = cmp_.delta_v_min
+            self._set(row, 4, self._fmt_delta_kmh(d_vmin),
+                      self._color_for(d_vmin, higher_is_better=True))
+
+            self._set(row, 5, self._fmt_m(cmp_.lap.throttle_point_m))
+
+            # Delta de tempo: negativo é ganho
+            d_t = cmp_.delta_time
+            self._set(row, 6, self._fmt_delta_t(d_t),
+                      self._color_for(d_t, higher_is_better=False))
+
+            if d_t is not None and d_t > worst_loss:
+                worst_loss, worst_row = d_t, row
+
+        self._highlight_worst(worst_row)
+
+    @staticmethod
+    def _color_for(value, higher_is_better: bool) -> str:
+        """Verde quando o piloto está melhor que a referência, vermelho quando pior."""
+        if value is None:
+            return T.TXT_DIM
+        if abs(value) < 1e-9:
+            return T.TXT_DIM
+        better = value > 0 if higher_is_better else value < 0
+        return T.OK if better else T.BAD
+
+    def _highlight_worst(self, worst_row: int):
+        """Marca a curva onde mais tempo foi perdido — onde começar a trabalhar."""
+        if self._worst_row == worst_row:
+            return
+        if self._worst_row >= 0:
+            for col in range(self.columnCount()):
+                item = self.item(self._worst_row, col)
+                if item:
+                    item.setBackground(QColor(T.BG_PANEL))
+        if worst_row >= 0:
+            for col in range(self.columnCount()):
+                item = self.item(worst_row, col)
+                if item:
+                    item.setBackground(QColor("#2a1214"))
+        self._worst_row = worst_row
+
+
 class TrackMapWidget(QWidget):
     def __init__(self):
         super(TrackMapWidget, self).__init__()

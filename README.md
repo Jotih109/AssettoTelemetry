@@ -80,6 +80,20 @@
 
 ---
 
+### 🔀 Análise Curva a Curva (Turn-by-Turn)
+- **Painel dedicado no rodapé:** uma linha por curva da pista, com o valor medido na volta analisada e o delta contra a volta de referência selecionada. A curva onde mais tempo foi perdido fica destacada em vermelho.
+- **Métricas por curva:**
+  - **Ponto de Frenagem** — metro em que o freio sai de ~0% e passa de 10%.
+  - **Velocidade Mínima ($V_{min}$)** — menor velocidade no ápice, e o delta contra a referência.
+  - **Ponto de Retomada** — metro em que o acelerador volta a 100%.
+  - **Delta da Curva ($\Delta t$)** — tempo ganho/perdido **só naquele trecho**, medido por interpolação de tempo nos limites da curva.
+- **Mapeamento por pista em JSON:** arquivos em `track_maps/`, com os limites em posição relativa (0.0–1.0) ou em metros. Veja `track_maps/README.md`.
+- **Fallback automático:** pista sem mapeamento tem as curvas detectadas por Força G lateral ($|G_{lat}| > 0.4$ g, com histerese e fusão de esses). O resultado é gravado como `*.auto.json`, então a numeração não muda de volta para volta — e você pode editar o arquivo, remover o `.auto` e ele passa a ser o mapeamento manual (que sempre vence).
+- **Voltas antigas também funcionam:** ghosts gravados antes do canal `g_lat` têm a Força G lateral reconstruída pela curvatura do traçado ($a_{lat} = v^2 \kappa$).
+- **Destaque nos gráficos:** botão **CURVAS** sombreia os limites de cada curva nos quatro gráficos da pilha, numerados no gráfico de velocidade.
+
+---
+
 ### 📋 Histórico, Persistência e Exportação
 - **Tabela de Histórico de Voltas:** Lista completa das voltas da sessão com S1, S2, S3, tempo total e $\Delta$ Best, destacando automaticamente a volta mais rápida.
 - **Gravação Automática em JSON:** Estrutura organizada por `telemetry_data/NomeDaPista/NomeDoCarro/`.
@@ -115,6 +129,7 @@ AssettoCorsa-Telemetry/
 ├── core/
 │   ├── engine.py           # Thread a 60 Hz: leitura e emissão de sinais Qt
 │   ├── models.py           # TelemetryState — estrutura de dados padronizada
+│   ├── corner_analysis.py  # Análise Curva a Curva: mapas, detecção por G e métricas
 │   ├── session_manager.py  # Gerenciamento de voltas, setores, ghosts e consumo
 │   └── storage.py          # Utilitários de gravação e leitura de dados
 ├── providers/
@@ -128,8 +143,10 @@ AssettoCorsa-Telemetry/
 │   └── components.py       # Widgets modulares (Cards, CustomPlot, AssistLED, etc.)
 ├── tests/
 │   ├── test_assettocorsa_provider.py  # Testes de unidade do provider do AC
+│   ├── test_corner_analysis.py        # Testes da análise curva a curva
 │   ├── test_session_manager.py        # Testes de persistência e validação de ghosts
 │   └── test_ui_smoke.py               # Testes de fumaça da interface gráfica
+├── track_maps/             # Mapeamento das curvas por pista (manual e detectado)
 ├── exportacoes/            # Screenshots PNG salvas manualmente ou via Best Lap
 ├── telemetry_data/         # Ghosts e voltas gravadas em JSON (por Pista/Carro)
 ├── main.pyw                # Ponto de entrada do aplicativo
@@ -182,6 +199,7 @@ Para rodar a suíte completa de testes unitários e de interface:
 python tests/test_ui_smoke.py
 python tests/test_session_manager.py
 python tests/test_assettocorsa_provider.py
+python tests/test_corner_analysis.py
 ```
 
 ---

@@ -17,8 +17,10 @@ from ui.sidebar_panel import SidebarPanel
 from ui.components import (
     TopMetricCard, SectorsCard, CustomPlot, LapHistoryTable, GhostSelectorCard, LapSelectorCard,
     GForceCard, WeatherCard, SessionCard, AssistsCard, BrakesCard, TireCard,
+    CornerAnalysisTable,
 )
 
+from core import corner_analysis as ca
 from core.paths import get_app_dir
 
 # Auto-exporta uma imagem PNG da análise sempre que uma nova Melhor Volta (Best Lap)
@@ -51,7 +53,15 @@ class DashboardMainWindow(QMainWindow):
         self._graph_x_max = 120.0
         self._last_exported_best = ""
         self._last_state = None
-        
+
+        # --- Análise Curva a Curva ---
+        self._corner_map = None          # core.corner_analysis.CornerMap
+        self._corners = []               # lista de Corner do mapa em uso
+        self._corner_track_length = 0.0
+        self._corner_regions = []        # faixas sombreadas nos gráficos
+        self._corner_comparisons = []
+        self.show_corner_regions = True
+
         self.init_ui()
         
         # Conecta o seletor de Referência
@@ -144,6 +154,26 @@ class DashboardMainWindow(QMainWindow):
         """)
         self.btn_export.clicked.connect(self.on_export_clicked)
 
+        # Liga/desliga as faixas sombreadas das curvas sobre os gráficos
+        self.btn_corners = QPushButton("CURVAS")
+        self.btn_corners.setFont(T.f_title(8))
+        self.btn_corners.setCursor(Qt.PointingHandCursor)
+        self.btn_corners.setCheckable(True)
+        self.btn_corners.setChecked(True)
+        self.btn_corners.setToolTip("Destaca os limites de cada curva nos gráficos")
+        self.btn_corners.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {T.BG_INSET};
+                color: {T.TXT_LABEL};
+                border: 1px solid {T.BORDER};
+                border-radius: 0px;
+                padding: 4px 10px;
+            }}
+            QPushButton:hover {{ background-color: {T.BG_HEADER}; color: {T.TXT_VALUE}; }}
+            QPushButton:checked {{ color: {T.CH_SPEED}; border: 1px solid {T.CH_SPEED}; }}
+        """)
+        self.btn_corners.toggled.connect(self.on_corner_regions_toggled)
+
         graph_header_row = QHBoxLayout()
         graph_header_row.setContentsMargins(0, 0, 0, 0)
         graph_header_row.addWidget(self.btn_live_state, alignment=Qt.AlignVCenter)
@@ -163,6 +193,8 @@ class DashboardMainWindow(QMainWindow):
         
         graph_header_row.addWidget(self.lbl_ref_est_laps, alignment=Qt.AlignVCenter)
         graph_header_row.addSpacing(15)
+        graph_header_row.addWidget(self.btn_corners, alignment=Qt.AlignVCenter)
+        graph_header_row.addSpacing(4)
         graph_header_row.addWidget(self.btn_export, alignment=Qt.AlignVCenter)
         right_area.addLayout(graph_header_row)
 
@@ -336,6 +368,14 @@ class DashboardMainWindow(QMainWindow):
             self.lap_history_table.styleSheet().replace(
                 f"border: 1px solid {T.BORDER};", "border: none;"))
                 
+        # Painel Curva a Curva — mesma faixa do histórico, à direita dele
+        self.corner_analysis_table = CornerAnalysisTable()
+        self.corner_analysis_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.corner_analysis_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.corner_panel = T.Panel(title="Curva a curva", body_margins=(0, 0, 0, 0))
+        self.corner_panel.body.addWidget(self.corner_analysis_table)
+        self.corner_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+
         self.gforce_card = GForceCard()
         self.weather_card = WeatherCard()
         self.session_card = SessionCard()
@@ -348,7 +388,7 @@ class DashboardMainWindow(QMainWindow):
         # e a unidade do vento aparecia cortada no painel da pista.
         # Somam 1484 px com os espaçamentos: cabe inteiro numa janela de 1500 px
         MIN_W = {
-            "history": 380, "gforce": 150, "weather": 155,
+            "history": 380, "corners": 520, "gforce": 150, "weather": 155,
             "session": 160, "assists": 155, "brakes": 210, "tires": 250,
         }
 
@@ -368,6 +408,8 @@ class DashboardMainWindow(QMainWindow):
 
         history_panel.setMinimumWidth(MIN_W["history"])
         footer_layout.addWidget(history_panel, stretch=3)
+        self.corner_panel.setMinimumWidth(MIN_W["corners"])
+        footer_layout.addWidget(self.corner_panel, stretch=4)
         for key, card in (("gforce", self.gforce_card), ("weather", self.weather_card),
                           ("session", self.session_card), ("assists", self.assists_card),
                           ("brakes", self.brakes_card), ("tires", self.tire_card)):
@@ -543,8 +585,9 @@ class DashboardMainWindow(QMainWindow):
     def on_selected_lap_changed(self, idx: int):
         if idx == 0:
             self.set_live_mode()
+            self._update_corner_analysis()
             return
-        
+
         self.is_live = False
         completed = self.session_manager.completed_laps
         if idx - 1 >= len(completed):
@@ -599,6 +642,9 @@ class DashboardMainWindow(QMainWindow):
             telemetry.get("car_x", []), telemetry.get("car_z", []),
             telemetry.get("gas", []), telemetry.get("brake", [])
         )
+
+        # A tabela curva a curva acompanha a volta exibida nos gráficos
+        self._update_corner_analysis()
 
     def _calc_lap_delta(self, lap_telemetry: dict, ref_ghost: dict) -> list:
         times = lap_telemetry.get("times", [])
@@ -704,6 +750,185 @@ class DashboardMainWindow(QMainWindow):
             self.sector2_line_pedals.setValue(s2_end)
             self.sector2_line_steer.setValue(s2_end)
             self.s2_text_delta.setPos(s2_end, 0.8)
+
+    # -----------------------------------------------------------------------
+    # Análise Curva a Curva (Turn-by-Turn)
+    # -----------------------------------------------------------------------
+
+    def _corner_reference_trace(self) -> dict:
+        """
+        Melhor volta disponível para servir de base à DETECÇÃO automática
+        de curvas: precisa de distância e de G lateral (ou do traçado X/Z,
+        de onde o G lateral é reconstruído por curvatura).
+        """
+        candidates = [
+            self.session_manager.session_best_lap_ghost.get("telemetry", {}),
+            self.session_manager.best_lap_ghost.get("telemetry", {}),
+        ]
+        candidates += [lap.get("telemetry", {})
+                       for lap in reversed(self.session_manager.completed_laps)]
+        for telem in candidates:
+            if len(telem.get("distance", [])) < 50:
+                continue
+            if telem.get("g_lat") or len(telem.get("car_x", [])) >= 50:
+                return telem
+        return {}
+
+    def _refresh_corner_map(self):
+        """
+        Resolve qual mapeamento de curvas usar para a pista atual.
+
+        Ordem: `track_maps/<pista>.json` (manual) → `<pista>.auto.json` →
+        detecção por Força G em cima da melhor volta disponível (que é então
+        gravada como .auto.json, para a numeração das curvas não mudar a cada
+        volta e para você poder editá-la e promovê-la a manual).
+        """
+        state = self._last_state
+        track = getattr(state, "track_name", "") if state else ""
+        length = float(getattr(state, "track_length", 0.0) or 0.0) if state else 0.0
+
+        cmap = ca.load_corner_map(track, length)
+        if cmap is None:
+            trace = self._corner_reference_trace()
+            if trace:
+                cmap = ca.build_auto_corner_map(track, trace, length)
+                if cmap and cmap.corners:
+                    path = ca.save_corner_map(cmap, auto=True)
+                    print(f"[CornerAnalysis] {len(cmap.corners)} curvas detectadas "
+                          f"automaticamente para '{track}'"
+                          + (f" → {os.path.basename(path)}" if path else ""))
+
+        self._corner_map = cmap
+        self._corners = list(cmap.corners) if cmap else []
+        self._corner_track_length = (cmap.track_length if cmap else 0.0) or length
+
+        origem = ""
+        if cmap:
+            origem = " — mapa manual" if cmap.source == "manual" else " — detecção automática"
+            origem += f" ({len(self._corners)} curvas)"
+        self.corner_panel.lbl_title.setText(f"CURVA A CURVA{origem.upper()}")
+
+    def _corner_analysis_lap(self):
+        """
+        Volta que a tabela analisa: a selecionada no seletor de voltas ou,
+        no modo ao vivo, a última volta concluída.
+
+        Analisar a volta em andamento a 60 Hz custaria caro e mostraria curvas
+        pela metade; a leitura útil é sempre da volta que acabou de fechar.
+        """
+        completed = self.session_manager.completed_laps
+        if not completed:
+            return None, ""
+        idx = self.lap_selector.combo.currentIndex() if hasattr(self, "lap_selector") else 0
+        if idx > 0 and idx - 1 < len(completed):
+            lap = completed[idx - 1]
+        else:
+            lap = completed[-1]
+        return lap.get("telemetry", {}), lap.get("lap_time_str", "")
+
+    def _update_corner_analysis(self):
+        """Recalcula a tabela curva a curva e as faixas nos gráficos."""
+        if not self._corners:
+            self._refresh_corner_map()
+        if not self._corners:
+            self.corner_analysis_table.setRowCount(0)
+            self._hide_corner_regions()
+            return
+
+        lap_telemetry, _ = self._corner_analysis_lap()
+        if not lap_telemetry:
+            self.corner_analysis_table.setRowCount(0)
+            self._hide_corner_regions()
+            return
+
+        ref_idx = self.ghost_selector.combo.currentIndex()
+        ref_telemetry = self._reference_ghost_for_index(ref_idx).get("telemetry", {})
+
+        length = self._corner_track_length or max(lap_telemetry.get("distance", [0.0]) or [0.0])
+        self._corner_comparisons = ca.compare_laps(
+            lap_telemetry, ref_telemetry, self._corners, length)
+        self.corner_analysis_table.update_corners(self._corner_comparisons)
+        self._update_corner_regions(lap_telemetry, length)
+
+    # --- Faixas sombreadas das curvas sobre os gráficos --------------------
+
+    def _corner_plots(self):
+        return (self.plot_delta, self.plot_speed, self.plot_pedals, self.plot_steer)
+
+    def _ensure_corner_regions(self, count: int):
+        """Cria (e reaproveita) as faixas: uma por curva em cada gráfico."""
+        brush = pg.mkBrush(QColor(77, 163, 255, 22))
+        pen = pg.mkPen(color=QColor(T.BORDER), width=1, style=Qt.DotLine)
+        while len(self._corner_regions) < count:
+            regions = []
+            for plot in self._corner_plots():
+                region = pg.LinearRegionItem(values=(0.0, 0.0), movable=False,
+                                             brush=brush, pen=pen)
+                region.setZValue(-100)   # atrás das curvas de telemetria
+                region.setVisible(False)
+                plot.addItem(region)
+                regions.append(region)
+            label = pg.TextItem("", color=T.TXT_LABEL, anchor=(0.5, 1.0))
+            label.setVisible(False)
+            self.plot_speed.addItem(label)
+            self._corner_regions.append((regions, label))
+
+    def _hide_corner_regions(self):
+        for regions, label in self._corner_regions:
+            for region in regions:
+                region.setVisible(False)
+            label.setVisible(False)
+
+    def _update_corner_regions(self, lap_telemetry: dict, track_length: float):
+        """
+        Posiciona as faixas no eixo X dos gráficos, que é TEMPO.
+
+        Os limites da curva são definidos em distância, então cada limite é
+        convertido para o instante em que a volta analisada passou por ele.
+        """
+        if not self.show_corner_regions:
+            self._hide_corner_regions()
+            return
+
+        distances = lap_telemetry.get("distance", [])
+        times = lap_telemetry.get("times", [])
+        if len(distances) < 2 or len(times) < 2:
+            self._hide_corner_regions()
+            return
+
+        self._ensure_corner_regions(len(self._corners))
+        # Número da curva no alto do gráfico de velocidade, onde não briga
+        # com a curva de dados
+        label_y = self._speed_y_max * 0.98
+
+        for i, corner in enumerate(self._corners):
+            regions, label = self._corner_regions[i]
+            t0 = ca.time_at_distance(lap_telemetry, corner.start_m(track_length))
+            t1 = ca.time_at_distance(lap_telemetry, corner.end_m(track_length))
+            if t0 is None or t1 is None or t1 <= t0:
+                for region in regions:
+                    region.setVisible(False)
+                label.setVisible(False)
+                continue
+            for region in regions:
+                region.setRegion((t0, t1))
+                region.setVisible(True)
+            label.setText(str(corner.index))
+            label.setPos((t0 + t1) / 2.0, label_y)
+            label.setVisible(True)
+
+        # Sobras do mapa anterior (pista com menos curvas) ficam escondidas
+        for regions, label in self._corner_regions[len(self._corners):]:
+            for region in regions:
+                region.setVisible(False)
+            label.setVisible(False)
+
+    def on_corner_regions_toggled(self, checked: bool):
+        self.show_corner_regions = checked
+        if not checked:
+            self._hide_corner_regions()
+        else:
+            self._update_corner_analysis()
 
     # -----------------------------------------------------------------------
     # Main telemetry update slot
@@ -909,7 +1134,10 @@ class DashboardMainWindow(QMainWindow):
                 self.on_ghost_mode_changed()
             self._update_best_map_base_trace()
             self.update_lap_selector_items()
-  
+            # Pista nova: recarrega/redetecta o mapeamento de curvas
+            self._refresh_corner_map()
+            self._update_corner_analysis()
+
         # --- Track position progress bar ---
         track_pos = getattr(state, 'track_position', 0.0)
         if self.is_live:
@@ -1048,6 +1276,8 @@ class DashboardMainWindow(QMainWindow):
             self._last_historic_count = historic_count
             self.update_lap_selector_items()
             self._update_best_map_base_trace()
+            # Volta fechada: é o momento de reavaliar as curvas
+            self._update_corner_analysis()
 
             best_time_ms = 0
             best_row_idx = -1
@@ -1159,6 +1389,9 @@ class DashboardMainWindow(QMainWindow):
             self.curve_ghost_brake.setData([], [])
             self.curve_ghost_steer.setData([], [])
             self.sidebar_panel.track_map_card.map_widget.set_data([], [], [], [])
+            # Mesmo com o ghost oculto nos gráficos, a referência numérica
+            # continua valendo (ver _reference_ghost_for_index)
+            self._update_corner_analysis()
             return
         elif idx == 1:
             ghost = self.session_manager.best_lap_ghost.get("telemetry", {})
@@ -1204,6 +1437,9 @@ class DashboardMainWindow(QMainWindow):
 
         if hasattr(self, 'lap_selector') and self.lap_selector.combo.currentIndex() > 0:
             self.on_selected_lap_changed(self.lap_selector.combo.currentIndex())
+
+        # Os deltas por curva são medidos contra a referência selecionada
+        self._update_corner_analysis()
 
     def closeEvent(self, event):
         print("Parando Thread de Telemetria...")

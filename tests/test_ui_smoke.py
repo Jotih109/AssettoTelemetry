@@ -216,6 +216,102 @@ try:
 
     check("seletor de voltas e navegação anterior/próxima", seletor_voltas)
 
+    def test_corner_analysis_panel():
+        """
+        Painel Curva a Curva: mapa manual da pista MOCK carregado, uma linha
+        por curva e as faixas sombreadas posicionadas nos quatro gráficos.
+        """
+        from providers.mock import TRACK_LENGTH
+
+        # Volta sintética completa, com todos os canais que a análise usa
+        n = 400
+        step = TRACK_LENGTH / n
+        telemetry = {
+            "times": [i * 0.22 for i in range(n)],
+            "distance": [i * step for i in range(n)],
+            "speed": [90.0 + 60.0 * abs(((i % 80) / 80.0) - 0.5) for i in range(n)],
+            "gas": [1.0 if (i % 80) > 40 else 0.3 for i in range(n)],
+            "brake": [0.9 if (i % 80) in (30, 31, 32) else 0.0 for i in range(n)],
+            "steer": [0.0] * n,
+            "sector": [0] * n,
+            "g_lat": [1.5 if (i % 80) > 35 else 0.05 for i in range(n)],
+            "car_x": [float(i) for i in range(n)],
+            "car_z": [float(i * 2) for i in range(n)],
+        }
+        win.session_manager.completed_laps.clear()
+        win.session_manager.completed_laps.append({
+            "lap_number": 3,
+            "lap_time_str": "1:28.000",
+            "metadata": {"track": "Mock", "car": "Mock"},
+            "telemetry": telemetry,
+        })
+        win.update_lap_selector_items()
+
+        win._refresh_corner_map()
+        assert win._corner_map is not None, "o mapa da pista MOCK não foi carregado"
+        assert win._corner_map.source == "manual"
+        assert len(win._corners) == 8, f"{len(win._corners)} curvas no mapa"
+
+        win._update_corner_analysis()
+        app.processEvents()
+        table = win.corner_analysis_table
+        assert table.rowCount() == 8, f"tabela com {table.rowCount()} linhas"
+        assert table.item(0, 0) is not None and "Senna" in table.item(0, 0).text()
+        # Toda linha tem as sete colunas preenchidas (mesmo que com "--")
+        for row in range(table.rowCount()):
+            for col in range(table.columnCount()):
+                assert table.item(row, col) is not None, f"célula vazia em {row},{col}"
+
+        # Faixas nos gráficos: uma por curva, em cada um dos quatro gráficos
+        assert len(win._corner_regions) >= 8
+        visible = [r for regions, _ in win._corner_regions for r in regions if r.isVisible()]
+        assert visible, "nenhuma faixa de curva visível"
+
+        # Liga/desliga o destaque
+        win.btn_corners.setChecked(False)
+        app.processEvents()
+        assert not any(r.isVisible() for regions, _ in win._corner_regions for r in regions)
+        win.btn_corners.setChecked(True)
+        app.processEvents()
+        assert any(r.isVisible() for regions, _ in win._corner_regions for r in regions)
+
+    check("painel curva a curva (mapa manual, tabela e faixas)",
+          test_corner_analysis_panel)
+
+    def test_corner_analysis_without_corner_map():
+        """
+        Pista sem mapeamento e sem volta utilizável: a tabela apenas esvazia.
+
+        Este era o caminho perigoso — analisar uma pista desconhecida não pode
+        derrubar o dashboard nem gravar mapa de lixo.
+        """
+        win._corner_map = None
+        win._corners = []
+        win._corner_track_length = 0.0
+        saved_laps = list(win.session_manager.completed_laps)
+        saved_state = win._last_state
+        win.session_manager.completed_laps.clear()
+        # Se sobrar algum ghost utilizável, a detecção automática gravaria um
+        # mapa — que vai para o diretório temporário, não para o repositório
+        saved_dir_fn = mw.ca.corner_maps_dir
+        mw.ca.corner_maps_dir = lambda: work
+        try:
+            from core.models import TelemetryState
+            win._last_state = TelemetryState(track_name="Pista Sem Mapa (TESTE)",
+                                             track_length=3000.0)
+            win._update_corner_analysis()
+            app.processEvents()
+            assert win.corner_analysis_table.rowCount() == 0
+            assert win._corners == []
+        finally:
+            mw.ca.corner_maps_dir = saved_dir_fn
+            win._last_state = saved_state
+            win.session_manager.completed_laps.extend(saved_laps)
+            win._refresh_corner_map()
+
+    check("curva a curva em pista sem mapeamento",
+          test_corner_analysis_without_corner_map)
+
     def test_map_base_trace_best_lap():
         win.session_manager.completed_laps.append({
             "lap_number": 2,

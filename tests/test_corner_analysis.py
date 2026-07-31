@@ -15,6 +15,7 @@ Não precisa de PyQt nem do jogo.
     python tests/test_corner_analysis.py
 """
 
+import json
 import math
 import os
 import shutil
@@ -399,6 +400,74 @@ def test_worst_corner():
     return f"pior: {worst.corner.name} ({worst.delta_time:+.3f}s)"
 
 
+def test_lap_coverage():
+    full = make_lap()
+    assert ca.lap_coverage(full, TRACK_LENGTH) > 0.99
+
+    # Volta gravada a partir de 54% da pista (app aberto no meio da volta)
+    half = {k: v[len(v) // 2:] for k, v in full.items()}
+    cov = ca.lap_coverage(half, TRACK_LENGTH)
+    assert 0.45 < cov < 0.55, cov
+    assert ca.lap_coverage({}, TRACK_LENGTH) == 0.0
+    return f"inteira=1.00 metade={cov:.2f}"
+
+
+def test_auto_map_records_coverage():
+    """
+    O mapa automático registra de quanto da volta ele saiu.
+
+    Foi um mapa tirado de meia volta que deixou o Spa com curvas só até 54% da
+    pista — as faixas nos gráficos não batiam com a volta, e nada refazia o
+    arquivo porque ele "existia".
+    """
+    full = make_lap()
+    cmap = ca.build_auto_corner_map("Pista", full, TRACK_LENGTH)
+    assert cmap.coverage > 0.99, cmap.coverage
+    assert not cmap.is_provisional
+
+    half = {k: v[len(v) // 2:] for k, v in full.items()}
+    partial = ca.build_auto_corner_map("Pista", half, TRACK_LENGTH)
+    assert partial is not None, "a meia volta ainda detecta a curva que ela contém"
+    assert partial.coverage < 0.6, partial.coverage
+    assert partial.is_provisional, "mapa de meia volta tem de ser provisório"
+
+    # Mapa manual nunca é provisório, mesmo sem o campo coverage no arquivo
+    manual = ca.parse_corner_map({"corners": [{"start": 0.1, "end": 0.2}]})
+    assert manual.coverage == 1.0 and not manual.is_provisional
+    return f"inteira={cmap.coverage:.2f} parcial={partial.coverage:.2f}"
+
+
+def test_legacy_auto_map_is_provisional():
+    """
+    Arquivo .auto.json gravado antes do campo `coverage` (como o spa.auto.json
+    que ficou com curvas só até 54%) vale como provisório, para ser refeito.
+    """
+    work = tempfile.mkdtemp(prefix="ac_corners_")
+    original = ca.corner_maps_dir
+    ca.corner_maps_dir = lambda: work
+    try:
+        # Sem "coverage": exatamente o formato antigo
+        with open(os.path.join(work, "spa.auto.json"), "w", encoding="utf-8") as f:
+            json.dump({"track": "Spa", "track_length": 7004.0, "source": "auto",
+                       "corners": [{"name": "C1", "start": 0.098, "end": 0.132},
+                                   {"name": "C2", "start": 0.44, "end": 0.538}]}, f)
+        loaded = ca.load_corner_map("Spa", 7004.0)
+        assert loaded is not None and loaded.source == "auto"
+        assert loaded.coverage == 0.0
+        assert loaded.is_provisional, "mapa auto sem coverage tem de ser provisório"
+
+        # Já um manual sem coverage é definitivo
+        with open(os.path.join(work, "monza.json"), "w", encoding="utf-8") as f:
+            json.dump({"track": "Monza",
+                       "corners": [{"name": "T1", "start": 0.1, "end": 0.2}]}, f)
+        m = ca.load_corner_map("Monza", 5793.0)
+        assert not m.is_provisional
+        return "auto sem coverage = provisório, manual = definitivo"
+    finally:
+        ca.corner_maps_dir = original
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def test_shipped_mock_map():
     """O mapa manual do provider MOCK que vem no repositório é válido."""
     from providers.mock import TRACK_NAME, TRACK_LENGTH as MOCK_LENGTH
@@ -434,6 +503,9 @@ for name, fn in [
     ("comparação sem volta de referência", test_compare_without_reference),
     ("curvas em sequência não dividem a mesma freada", test_sequential_corners_dont_share_braking),
     ("pior curva da volta", test_worst_corner),
+    ("cobertura da volta", test_lap_coverage),
+    ("mapa automático registra a cobertura", test_auto_map_records_coverage),
+    ("mapa .auto antigo (sem cobertura) é provisório", test_legacy_auto_map_is_provisional),
     ("mapa do MOCK que vem no repositório", test_shipped_mock_map),
 ]:
     check(name, fn)

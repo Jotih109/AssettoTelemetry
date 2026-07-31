@@ -115,12 +115,23 @@ class CornerMap:
     corners: List[Corner] = dataclasses.field(default_factory=list)
     #: "manual" (arquivo escrito à mão) ou "auto" (detectado pela Força G)
     source: str = "manual"
+    #: Fração da volta coberta pela telemetria de onde as curvas foram
+    #: detectadas. Um mapa tirado de meia volta só conhece metade das curvas —
+    #: ele serve por enquanto, mas precisa ser refeito quando aparecer uma
+    #: volta inteira.
+    coverage: float = 1.0
+
+    @property
+    def is_provisional(self) -> bool:
+        """Mapa automático tirado de uma volta incompleta."""
+        return self.source == "auto" and self.coverage < 0.95
 
     def to_dict(self) -> dict:
         return {
             "track": self.track,
             "track_length": round(self.track_length, 1),
             "source": self.source,
+            "coverage": round(self.coverage, 4),
             "corners": [c.to_dict() for c in self.corners],
         }
 
@@ -257,11 +268,13 @@ def parse_corner_map(data: dict, track_length: float = 0.0) -> Optional[CornerMa
     for i, c in enumerate(corners, start=1):
         c.index = i
 
+    coverage = data.get("coverage")
     return CornerMap(
         track=str(data.get("track") or ""),
         track_length=length,
         corners=corners,
         source=str(data.get("source") or "manual"),
+        coverage=float(coverage) if isinstance(coverage, (int, float)) else 1.0,
     )
 
 
@@ -294,6 +307,11 @@ def load_corner_map(track_name: str, track_length: float = 0.0) -> Optional[Corn
             cmap = parse_corner_map(data, track_length)
             if cmap:
                 cmap.source = source
+                # Mapa automático gravado antes de existir o campo `coverage`:
+                # não há como saber de que parte da volta ele saiu, então vale
+                # como provisório e é refeito na primeira volta inteira.
+                if source == "auto" and "coverage" not in data:
+                    cmap.coverage = 0.0
                 if not cmap.track:
                     cmap.track = track_name
                 return cmap
@@ -451,6 +469,22 @@ def detect_corners(telemetry: dict, track_length: float = 0.0,
     return corners
 
 
+def lap_coverage(telemetry: dict, track_length: float = 0.0) -> float:
+    """
+    Que fração da volta a telemetria cobre (0.0 a 1.0).
+
+    Uma volta gravada pela metade só revela metade das curvas — foi assim que
+    um mapa automático de Spa acabou com curvas só até 54% da pista.
+    """
+    distances = telemetry.get("distance") or []
+    if len(distances) < 2:
+        return 0.0
+    length = float(track_length or 0.0) or max(distances)
+    if length <= 0:
+        return 0.0
+    return max(0.0, min(1.0, (distances[-1] - distances[0]) / length))
+
+
 def build_auto_corner_map(track_name: str, telemetry: dict,
                           track_length: float = 0.0) -> Optional[CornerMap]:
     """Detecta as curvas de uma volta e devolve um CornerMap pronto para salvar."""
@@ -460,7 +494,8 @@ def build_auto_corner_map(track_name: str, telemetry: dict,
     if not corners:
         return None
     return CornerMap(track=track_name or "", track_length=length,
-                     corners=corners, source="auto")
+                     corners=corners, source="auto",
+                     coverage=lap_coverage(telemetry, length))
 
 
 # ---------------------------------------------------------------------------

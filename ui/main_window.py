@@ -1,5 +1,6 @@
 import collections
 import os
+import traceback
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGridLayout,
     QPushButton, QSizePolicy, QSplitter, QProgressBar, QSlider, QScrollArea,
@@ -795,9 +796,15 @@ class DashboardMainWindow(QMainWindow):
     def _corner_reference_trace(self) -> dict:
         """
         Melhor volta disponível para servir de base à DETECÇÃO automática
-        de curvas: precisa de distância e de G lateral (ou do traçado X/Z,
-        de onde o G lateral é reconstruído por curvatura).
+        de curvas: precisa de distância, de G lateral (ou do traçado X/Z, de
+        onde o G lateral é reconstruído por curvatura) e — o que mais importa —
+        de cobrir a volta INTEIRA.
+
+        Detectar em cima de meia volta só encontra as curvas daquela metade:
+        foi assim que o mapa automático de Spa ficou com curvas apenas até 54%
+        da pista, e as faixas nos gráficos não bateram com a volta.
         """
+        length = float(getattr(self._last_state, "track_length", 0.0) or 0.0)
         candidates = [
             self.session_manager.session_best_lap_ghost.get("telemetry", {}),
             self.session_manager.best_lap_ghost.get("telemetry", {}),
@@ -807,8 +814,11 @@ class DashboardMainWindow(QMainWindow):
         for telem in candidates:
             if len(telem.get("distance", [])) < 50:
                 continue
-            if telem.get("g_lat") or len(telem.get("car_x", [])) >= 50:
-                return telem
+            if not (telem.get("g_lat") or len(telem.get("car_x", [])) >= 50):
+                continue
+            if ca.lap_coverage(telem, length) < 0.95:
+                continue
+            return telem
         return {}
 
     def _refresh_corner_map(self):
@@ -825,22 +835,44 @@ class DashboardMainWindow(QMainWindow):
         length = float(getattr(state, "track_length", 0.0) or 0.0) if state else 0.0
 
         cmap = ca.load_corner_map(track, length)
-        if cmap is None:
+
+        # Detecta quando não há mapa nenhum, e TAMBÉM quando o mapa automático
+        # que existe saiu de uma volta incompleta — nesse caso ele conhece só as
+        # curvas de um pedaço da pista e precisa ser refeito.
+        if cmap is None or cmap.is_provisional:
             trace = self._corner_reference_trace()
             if trace:
-                cmap = ca.build_auto_corner_map(track, trace, length)
-                if cmap and cmap.corners:
-                    path = ca.save_corner_map(cmap, auto=True)
-                    print(f"[CornerAnalysis] {len(cmap.corners)} curvas detectadas "
-                          f"automaticamente para '{track}'"
-                          + (f" → {os.path.basename(path)}" if path else ""))
+                fresh = ca.build_auto_corner_map(track, trace, length)
+                if fresh and fresh.corners:
+                    path = ca.save_corner_map(fresh, auto=True)
+                    motivo = ("refeitas (o mapa anterior saiu de uma volta incompleta)"
+                              if cmap is not None else "detectadas automaticamente")
+                    # ASCII de propósito: no console do Windows (cp1252) um
+                    # caractere como "→" levanta UnicodeEncodeError, e este
+                    # print roda dentro da atualização da telemetria
+                    print(f"[CornerAnalysis] {len(fresh.corners)} curvas {motivo} "
+                          f"para '{track}'"
+                          + (f" -> {os.path.basename(path)}" if path else ""))
+                    cmap = fresh
+            elif cmap is not None:
+                print(f"[CornerAnalysis] Mapa automático de '{track}' cobre só "
+                      f"{cmap.coverage * 100:.0f}% da volta; será refeito quando "
+                      f"uma volta completa for gravada.")
 
         self._corner_map = cmap
         self._corners = list(cmap.corners) if cmap else []
-        self._corner_track_length = (cmap.track_length if cmap else 0.0) or length
+        # Os limites da curva são posições relativas (0..1). Converter para
+        # metros precisa da MESMA escala que gerou o eixo de distância da volta
+        # (distance = track_position * track_length do provider). Usar o
+        # track_length gravado no arquivo do mapa desalinhava as faixas quando
+        # os dois valores não batiam.
+        self._corner_track_length = length or (cmap.track_length if cmap else 0.0)
 
         if self._corners:
-            self.corner_panel.lbl_title.setText(f"CURVA A CURVA ({len(self._corners)})")
+            titulo = f"CURVA A CURVA ({len(self._corners)})"
+            if cmap and cmap.is_provisional:
+                titulo += " — PARCIAL"
+            self.corner_panel.lbl_title.setText(titulo)
         else:
             self.corner_panel.lbl_title.setText("CURVA A CURVA")
 
@@ -872,8 +904,26 @@ class DashboardMainWindow(QMainWindow):
         return lap.get("telemetry", {}), lap.get("lap_time_str", "")
 
     def _update_corner_analysis(self):
-        """Recalcula a tabela curva a curva e as faixas nos gráficos."""
-        if not self._corners:
+        """
+        Recalcula a tabela curva a curva e as faixas nos gráficos.
+
+        Blindado: esta análise é auxiliar e roda a partir do mesmo slot que
+        atualiza o dashboard ao vivo. Uma falha aqui não pode levar o resto da
+        tela com ela — o erro aparece uma vez no console e a análise para.
+        """
+        try:
+            self._do_update_corner_analysis()
+        except Exception:
+            if not getattr(self, "_corner_analysis_failed", False):
+                self._corner_analysis_failed = True
+                print("[CornerAnalysis] Falha ao atualizar a análise curva a curva; "
+                      "o dashboard continua normalmente:")
+                traceback.print_exc()
+
+    def _do_update_corner_analysis(self):
+        # Um mapa provisório (detectado em volta incompleta) é reavaliado a cada
+        # volta nova, até aparecer uma volta inteira para refazê-lo
+        if not self._corners or (self._corner_map and self._corner_map.is_provisional):
             self._refresh_corner_map()
         if not self._corners:
             self.corner_analysis_table.setRowCount(0)

@@ -1131,7 +1131,8 @@ class DashboardMainWindow(QMainWindow):
         if not self.engineer.should_speak(now):
             return
         for advice in self.engineer.pick_for_voice(advices, limit=speak_limit):
-            self.voice.say(advice.text)
+            # `spoken`, não `text`: decimal com vírgula para a fala sair natural
+            self.voice.say(advice.spoken)
         self.engineer.mark_spoken(now)
 
     def _reference_lap_time_str(self) -> str:

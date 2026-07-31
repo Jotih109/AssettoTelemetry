@@ -1366,7 +1366,7 @@ class LapHistoryTable(QTableWidget):
                 font-family: "{T.FONT_MONO}";
                 font-size: 9pt;
             }}
-            QTableWidget::item {{ padding: 2px 5px; }}
+            QTableWidget::item {{ padding: 2px 3px; }}
             QHeaderView::section {{
                 background-color: {T.BG_HEADER};
                 color: {T.TXT_TITLE};
@@ -1378,8 +1378,7 @@ class LapHistoryTable(QTableWidget):
                 font-weight: bold;
             }}
         """)
-        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.horizontalHeader().setStretchLastSection(True)
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.verticalHeader().setVisible(False)
         self.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
@@ -1405,14 +1404,13 @@ class LapHistoryTable(QTableWidget):
 
 class CornerAnalysisTable(QTableWidget):
     """
-    Tabela Curva a Curva (Turn-by-Turn), no espírito do relatório de curvas do i2.
+    Tabela Curva a Curva (Turn-by-Turn).
 
-    Uma linha por curva da pista, com o valor medido na volta analisada e o
-    delta contra a volta de referência. O delta de tempo é a coluna que
-    interessa: é ela que diz onde o tempo foi perdido.
+    Uma linha por curva da pista, exibindo a numeração da curva, o tempo
+    gasto na curva e o delta de tempo contra a volta de referência.
     """
 
-    HEADERS = ["CURVA", "FREIO", "Δ FREIO", "V.MIN", "Δ V.MIN", "RETOMADA", "Δ T"]
+    HEADERS = ["CURVA", "TEMPO", "Δ T"]
 
     def __init__(self):
         super(CornerAnalysisTable, self).__init__(0, len(self.HEADERS))
@@ -1439,10 +1437,9 @@ class CornerAnalysisTable(QTableWidget):
                 font-weight: bold;
             }}
         """)
-        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.horizontalHeader().setStretchLastSection(True)
-        # São sete colunas: em janela estreita é melhor rolar do que cortar a
-        # coluna de delta de tempo, que é justamente a que interessa
+        self.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.verticalHeader().setVisible(False)
         self.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
@@ -1455,20 +1452,8 @@ class CornerAnalysisTable(QTableWidget):
     # -- helpers de formatação -------------------------------------------
 
     @staticmethod
-    def _fmt_m(value) -> str:
-        return "--" if value is None else f"{value:.0f}m"
-
-    @staticmethod
-    def _fmt_kmh(value) -> str:
-        return "--" if value is None else f"{value:.0f}"
-
-    @staticmethod
-    def _fmt_delta_m(value) -> str:
-        return "--" if value is None else f"{value:+.0f}m"
-
-    @staticmethod
-    def _fmt_delta_kmh(value) -> str:
-        return "--" if value is None else f"{value:+.1f}"
+    def _fmt_sec_time(value) -> str:
+        return "--" if value is None else f"{value:.3f}s"
 
     @staticmethod
     def _fmt_delta_t(value) -> str:
@@ -1497,27 +1482,20 @@ class CornerAnalysisTable(QTableWidget):
 
         for row, cmp_ in enumerate(comparisons):
             corner = cmp_.corner
-            label = f"{corner.index:>2} {corner.name}"
-            if corner.direction:
-                label += f" ({corner.direction})"
+            name = (corner.name or "").strip()
+            if name and name not in (f"C{corner.index}", f"Curva {corner.index}", str(corner.index)):
+                label = f"C{corner.index} ({name})"
+            else:
+                label = f"C{corner.index}"
             self._set(row, 0, label, T.TXT_LABEL)
 
-            self._set(row, 1, self._fmt_m(cmp_.lap.braking_point_m))
-            # Freou mais fundo que a referência (+) é o lado bom aqui
-            d_brake = cmp_.delta_braking_m
-            self._set(row, 2, self._fmt_delta_m(d_brake),
-                      self._color_for(d_brake, higher_is_better=True))
-
-            self._set(row, 3, self._fmt_kmh(cmp_.lap.v_min))
-            d_vmin = cmp_.delta_v_min
-            self._set(row, 4, self._fmt_delta_kmh(d_vmin),
-                      self._color_for(d_vmin, higher_is_better=True))
-
-            self._set(row, 5, self._fmt_m(cmp_.lap.throttle_point_m))
+            # Tempo gasto na curva
+            sec_time = cmp_.lap.section_time
+            self._set(row, 1, self._fmt_sec_time(sec_time), T.TXT_VALUE)
 
             # Delta de tempo: negativo é ganho
             d_t = cmp_.delta_time
-            self._set(row, 6, self._fmt_delta_t(d_t),
+            self._set(row, 2, self._fmt_delta_t(d_t),
                       self._color_for(d_t, higher_is_better=False))
 
             if d_t is not None and d_t > worst_loss:

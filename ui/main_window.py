@@ -388,8 +388,8 @@ class DashboardMainWindow(QMainWindow):
         # e a unidade do vento aparecia cortada no painel da pista.
         # Somam 1484 px com os espaçamentos: cabe inteiro numa janela de 1500 px
         MIN_W = {
-            "history": 380, "corners": 520, "gforce": 150, "weather": 155,
-            "session": 160, "assists": 155, "brakes": 210, "tires": 250,
+            "history": 410, "corners": 210, "gforce": 140, "weather": 150,
+            "session": 155, "assists": 150, "brakes": 200, "tires": 240,
         }
 
         cards = (self.gforce_card, self.weather_card, self.session_card,
@@ -407,9 +407,9 @@ class DashboardMainWindow(QMainWindow):
         footer_layout.setSpacing(4)
 
         history_panel.setMinimumWidth(MIN_W["history"])
-        footer_layout.addWidget(history_panel, stretch=3)
+        footer_layout.addWidget(history_panel, stretch=4)
         self.corner_panel.setMinimumWidth(MIN_W["corners"])
-        footer_layout.addWidget(self.corner_panel, stretch=4)
+        footer_layout.addWidget(self.corner_panel, stretch=2)
         for key, card in (("gforce", self.gforce_card), ("weather", self.weather_card),
                           ("session", self.session_card), ("assists", self.assists_card),
                           ("brakes", self.brakes_card), ("tires", self.tire_card)):
@@ -802,11 +802,10 @@ class DashboardMainWindow(QMainWindow):
         self._corners = list(cmap.corners) if cmap else []
         self._corner_track_length = (cmap.track_length if cmap else 0.0) or length
 
-        origem = ""
-        if cmap:
-            origem = " — mapa manual" if cmap.source == "manual" else " — detecção automática"
-            origem += f" ({len(self._corners)} curvas)"
-        self.corner_panel.lbl_title.setText(f"CURVA A CURVA{origem.upper()}")
+        if self._corners:
+            self.corner_panel.lbl_title.setText(f"CURVA A CURVA ({len(self._corners)})")
+        else:
+            self.corner_panel.lbl_title.setText("CURVA A CURVA")
 
     def _corner_analysis_lap(self):
         """

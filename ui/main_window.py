@@ -863,6 +863,9 @@ class DashboardMainWindow(QMainWindow):
             for plot in self._corner_plots():
                 region = pg.LinearRegionItem(values=(0.0, 0.0), movable=False,
                                              brush=brush, pen=pen)
+                for line in region.lines:
+                    line.setPen(pg.mkPen(None))
+                    line.setHoverPen(pg.mkPen(None))
                 region.setZValue(-100)   # atrás das curvas de telemetria
                 region.setVisible(False)
                 plot.addItem(region)

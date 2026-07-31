@@ -8,6 +8,9 @@ venv/
 telemetry_data/
 telemetry_sessions/
 exportacoes/
+# Mapas de curva DETECTADOS pelo app: são refeitos sozinhos e valem só para
+# quem os gerou. Os mapas manuais (track_maps/<pista>.json) ficam versionados.
+track_maps/*.auto.json
 telemetry.json
 *.corrupt
 *.json.tmp

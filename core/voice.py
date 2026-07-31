@@ -25,8 +25,19 @@ import threading
 #: Mais que isso na fila e as mensagens antigas perdem a validade.
 MAX_QUEUE = 3
 
-#: Preferência de voz: o SAPI do Windows costuma trazer uma pt-BR instalada.
-PREFERRED_VOICE_HINTS = ("portuguese", "brazil", "maria", "daniel")
+#: Categoria das vozes OneCore (Windows 10/11). São bem mais naturais que as
+#: "Desktop" do SAPI clássico — e o SAPI NÃO as enumera por padrão, é preciso
+#: pedir esta categoria explicitamente. Num Windows típico em português isso é
+#: a diferença entre "Microsoft Maria Desktop" (robótica) e "Microsoft Daniel".
+ONECORE_CATEGORY = r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech_OneCore\Voices"
+
+#: Nome preferido quando há mais de uma voz boa no mesmo idioma. Troque para
+#: "maria" se preferir voz feminina — a escolha cai para a melhor disponível
+#: se o nome pedido não existir.
+PREFERRED_VOICE_NAME = "daniel"
+
+#: Pistas de idioma: engenheiro falando português ganha de qualquer outra coisa.
+LANGUAGE_HINTS = ("portugu", "brazil", "brasil")
 
 
 class VoiceEngine:
@@ -84,6 +95,60 @@ class VoiceEngine:
 
     # -- Thread de fala ---------------------------------------------------
 
+    @staticmethod
+    def voice_score(description: str) -> int:
+        """
+        Nota de uma voz pela descrição. Maior é melhor.
+
+        A regra que mais importa: voz "Desktop" é a geração antiga do SAPI e
+        soa mecânica; a mesma locutora na versão OneCore soa muito melhor. Como
+        as duas se chamam quase igual ("Microsoft Maria Desktop" x "Microsoft
+        Maria"), é o sufixo que as separa.
+        """
+        d = (description or "").lower()
+        score = 0
+        if any(hint in d for hint in LANGUAGE_HINTS):
+            score += 100
+        if "desktop" not in d:
+            score += 50
+        if PREFERRED_VOICE_NAME and PREFERRED_VOICE_NAME in d:
+            score += 10
+        return score
+
+    def _all_tokens(self, win32com, voice):
+        """
+        Todas as vozes instaladas: OneCore + SAPI clássico.
+
+        `voice.GetVoices()` só devolve as do SAPI clássico; as OneCore ficam em
+        outra categoria do registro e precisam ser pedidas à parte.
+        """
+        tokens = []
+        try:
+            cat = win32com.client.Dispatch("SAPI.SpObjectTokenCategory")
+            cat.SetId(ONECORE_CATEGORY, False)
+            enum = cat.EnumerateTokens()
+            tokens += [enum.Item(i) for i in range(enum.Count)]
+        except Exception:
+            pass   # Windows sem OneCore (ou outro sistema): segue com o clássico
+        try:
+            classic = voice.GetVoices()
+            tokens += [classic.Item(i) for i in range(classic.Count)]
+        except Exception:
+            pass
+        return tokens
+
+    def _best_token(self, win32com, voice):
+        """A melhor voz disponível pelo critério de `voice_score`."""
+        melhor, melhor_nota = None, -1
+        for token in self._all_tokens(win32com, voice):
+            try:
+                nota = self.voice_score(token.GetDescription())
+            except Exception:
+                continue
+            if nota > melhor_nota:
+                melhor, melhor_nota = token, nota
+        return melhor
+
     def _make_voice(self):
         """
         Cria o objeto SAPI dentro da thread. Devolve (voice, com_module) ou
@@ -102,20 +167,14 @@ class VoiceEngine:
             voice = win32com.client.Dispatch("SAPI.SpVoice")
             voice.Rate = self.rate
 
-            # Prefere uma voz em português, se o Windows tiver uma instalada
-            try:
-                for token in voice.GetVoices():
-                    desc = token.GetDescription()
-                    if any(h in desc.lower() for h in PREFERRED_VOICE_HINTS):
-                        voice.Voice = token
-                        self.voice_name = desc
-                        break
-                else:
-                    tokens = voice.GetVoices()
-                    if tokens.Count:
-                        self.voice_name = tokens.Item(0).GetDescription()
-            except Exception:
-                pass   # voz padrão serve
+            token = self._best_token(win32com, voice)
+            if token is not None:
+                try:
+                    voice.Voice = token
+                    self.voice_name = token.GetDescription()
+                except Exception as e:
+                    print(f"[Voice] Não foi possível usar a voz escolhida "
+                          f"({type(e).__name__}); seguindo com a voz padrão.")
 
             self.available = True
             print(f"[Voice] Engenheiro com voz: {self.voice_name or 'voz padrão'}")

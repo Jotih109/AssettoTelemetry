@@ -22,7 +22,13 @@ Nada aqui depende de PyQt: dá para testar tudo com voltas sintéticas.
 """
 
 import dataclasses
+import re
 from typing import List, Optional
+
+#: Números decimais no texto falado: em português quem lê "0.42" fala "zero
+#: PONTO quarenta e dois", que soa errado. Com vírgula, o sintetizador lê
+#: "zero vírgula quarenta e dois".
+_DECIMAL_RE = re.compile(r"(\d)\.(\d)")
 
 # ---------------------------------------------------------------------------
 # Severidade
@@ -111,6 +117,16 @@ class Advice:
     @property
     def display(self) -> str:
         return f"{self.text} — {self.detail}" if self.detail else self.text
+
+    @property
+    def spoken(self) -> str:
+        """
+        O texto como deve ser FALADO (o painel continua mostrando `display`).
+
+        Só troca o separador decimal por vírgula: é o que faz o sintetizador
+        ler "zero vírgula quarenta e dois" em vez de "zero ponto quatro dois".
+        """
+        return _DECIMAL_RE.sub(r"\1,\2", self.text)
 
     def __str__(self) -> str:
         return self.display
@@ -306,16 +322,18 @@ class RaceEngineer:
 
         # --- Resumo da volta ---
         if lap_delta_s is not None and lap_time_str:
+            # Duas casas na fala (três milésimos ditos em voz alta viram
+            # ladainha); o detalhe do painel mantém a precisão cheia
             if lap_delta_s <= -0.001:
                 out.append(Advice(
                     key="lap:melhor", severity=INFO,
-                    text=f"Boa volta, {abs(lap_delta_s):.3f} segundos melhor que a referência",
+                    text=f"Boa volta, {abs(lap_delta_s):.2f} segundos melhor que a referência",
                     detail=f"{lap_time_str} ({_fmt_s(lap_delta_s)})",
                     kind="lap", time_at_stake=abs(lap_delta_s)))
             elif lap_delta_s > 0.001:
                 out.append(Advice(
                     key="lap:pior", severity=INFO,
-                    text=f"Volta {lap_delta_s:.3f} segundos acima da referência",
+                    text=f"Volta {lap_delta_s:.2f} segundos acima da referência",
                     detail=f"{lap_time_str} ({_fmt_s(lap_delta_s)})",
                     kind="lap", time_at_stake=lap_delta_s))
 

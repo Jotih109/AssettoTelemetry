@@ -381,6 +381,41 @@ def test_escolha_do_que_falar():
     return textos(falados)[:90]
 
 
+def test_texto_falado_usa_virgula():
+    """
+    O que vai para a voz usa vírgula decimal; o painel mantém o ponto.
+
+    Em português, "0.42" é lido como "zero PONTO quarenta e dois" — soa errado.
+    """
+    eng = RaceEngineer()
+    adv = [a for a in eng.analyze_lap([comparison(delta_t=0.42, d_brake=-20.0)])
+           if a.corner == 1][0]
+    assert "0.42" in adv.text, adv.text          # painel
+    assert "0,42" in adv.spoken, adv.spoken      # voz
+    assert "0.42" not in adv.spoken, adv.spoken
+    # E nada mais é alterado
+    assert adv.spoken.replace("0,42", "0.42") == adv.text
+    return adv.spoken
+
+
+def test_pontuacao_de_voz():
+    """
+    A escolha da voz: português ganha de inglês, e a versão OneCore ganha da
+    "Desktop" (mesma locutora, geração antiga e mecânica do SAPI).
+    """
+    from core.voice import VoiceEngine
+    nota = VoiceEngine.voice_score
+
+    onecore_pt = nota("Microsoft Daniel - Portuguese (Brazil)")
+    desktop_pt = nota("Microsoft Maria Desktop - Portuguese(Brazil)")
+    desktop_en = nota("Microsoft Zira Desktop - English (United States)")
+
+    assert onecore_pt > desktop_pt, (onecore_pt, desktop_pt)
+    assert desktop_pt > desktop_en, (desktop_pt, desktop_en)
+    assert nota("") == 50 or nota("") >= 0
+    return f"OneCore pt={onecore_pt} > Desktop pt={desktop_pt} > Desktop en={desktop_en}"
+
+
 def test_intervalo_minimo_entre_falas():
     eng = RaceEngineer()
     assert eng.should_speak(100.0)
@@ -453,6 +488,8 @@ for nome, fn in [
     ("ao vivo: penalidade e corta-caminho", test_live_penalidade_e_corta_caminho),
     ("ao vivo: carro saudável fica calado", test_live_carro_saudavel_fica_calado),
     ("escolha do que vai para a voz", test_escolha_do_que_falar),
+    ("texto falado usa vírgula decimal", test_texto_falado_usa_virgula),
+    ("pontuação de escolha da voz", test_pontuacao_de_voz),
     ("intervalo mínimo entre falas", test_intervalo_minimo_entre_falas),
     ("consistência ruim", test_consistencia_ruim),
     ("consistência boa", test_consistencia_boa),

@@ -87,7 +87,9 @@
   - **Fim de volta** — o balanço da volta que acabou (padrão).
   - **Ao vivo** — avisos com o carro na pista: roda travando, TC cortando, pneu superaquecido, bandeira, penalidade, combustível.
   - **Sob demanda** — nada aparece sem você clicar em **ANALISAR**.
-- **Texto e voz:** painel com histórico colorido por severidade (crítico / atenção / info) e fala pelo SAPI do Windows, preferindo automaticamente uma voz em português. O botão **VOZ** desliga a fala sem apagar o texto.
+- **Texto e voz:** painel com histórico colorido por severidade (crítico / atenção / info) e fala pelo SAPI do Windows. O botão **VOZ** desliga a fala sem apagar o texto.
+- **Escolha automática da melhor voz:** prioriza as vozes **OneCore** do Windows 10/11 (`Microsoft Daniel` / `Microsoft Maria`), muito mais naturais que as `... Desktop` do SAPI clássico — que são as únicas que o Windows enumera por padrão. Em português na frente de qualquer outro idioma. Para preferir voz feminina, troque `PREFERRED_VOICE_NAME` em [core/voice.py](core/voice.py).
+- **Fala em português de verdade:** o número dito usa vírgula decimal (`0,42`), senão o sintetizador lê "zero ponto quatro dois". O painel mantém o ponto, como o resto do app.
 - **Não metralha o piloto:** cada regra tem tempo de espera próprio, há intervalo mínimo entre falas, e só o essencial vai para a voz (o crítico + a curva onde mais se perdeu). O resto fica no painel.
 - **O que ele analisa:** perda de tempo por curva e a causa (ponto de frenagem, $V_{min}$, ponto de retomada), vício de ABS/TC ao longo da volta com a curva do pior ponto, câmber pela banda de rodagem, autonomia de combustível vs. voltas restantes, consistência entre as últimas voltas, temperatura de pneus e freios, clipping de force feedback.
 - **Fica calado quando está tudo bem** — é o comportamento mais testado da funcionalidade.

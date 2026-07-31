@@ -1,0 +1,17 @@
+{
+  "track": "ks_interlagos",
+  "track_length": 4309.0,
+  "source": "manual",
+  "corners": [
+    {"name": "S do Senna 1", "start": 0.022, "end": 0.055, "direction": "L"},
+    {"name": "S do Senna 2", "start": 0.055, "end": 0.088, "direction": "R"},
+    {"name": "Curva do Sol", "start": 0.095, "end": 0.155, "direction": "L"},
+    {"name": "Descida do Lago", "start": 0.395, "end": 0.470, "direction": "L"},
+    {"name": "Ferradura", "start": 0.510, "end": 0.585, "direction": "R"},
+    {"name": "Laranjinha", "start": 0.615, "end": 0.685, "direction": "R"},
+    {"name": "Pinheirinho", "start": 0.710, "end": 0.765, "direction": "L"},
+    {"name": "Bico de Pato", "start": 0.775, "end": 0.835, "direction": "R"},
+    {"name": "Mergulho", "start": 0.845, "end": 0.895, "direction": "L"},
+    {"name": "Junção", "start": 0.905, "end": 0.965, "direction": "L"}
+  ]
+}

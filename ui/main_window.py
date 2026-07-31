@@ -857,7 +857,7 @@ class DashboardMainWindow(QMainWindow):
     def _ensure_corner_regions(self, count: int):
         """Cria (e reaproveita) as faixas: uma por curva em cada gráfico."""
         brush = pg.mkBrush(QColor(77, 163, 255, 22))
-        pen = pg.mkPen(color=QColor(T.BORDER), width=1, style=Qt.DotLine)
+        pen = pg.mkPen(None)
         while len(self._corner_regions) < count:
             regions = []
             for plot in self._corner_plots():

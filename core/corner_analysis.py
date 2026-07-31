@@ -273,23 +273,30 @@ def load_corner_map(track_name: str, track_length: float = 0.0) -> Optional[Corn
     rodar `detect_corners` em cima de uma volta e gravar com `save_corner_map`.
     """
     slug = track_slug(track_name)
+    possible_slugs = [slug]
+    if "interlagos" in slug or "pace" in slug:
+        for alias in ("interlagos", "ks_interlagos", "autodromo_jose_carlos_pace", "autodromo_jose_carlos_pace_grand_prix_mock"):
+            if alias not in possible_slugs:
+                possible_slugs.append(alias)
+
     base = corner_maps_dir()
-    for filename, source in ((f"{slug}.json", "manual"), (f"{slug}.auto.json", "auto")):
-        path = os.path.join(base, filename)
-        if not os.path.exists(path):
-            continue
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError, UnicodeDecodeError) as e:
-            print(f"[CornerAnalysis] Mapa de curvas inválido, ignorando: {path} ({e})")
-            continue
-        cmap = parse_corner_map(data, track_length)
-        if cmap:
-            cmap.source = source
-            if not cmap.track:
-                cmap.track = track_name
-            return cmap
+    for s in possible_slugs:
+        for filename, source in ((f"{s}.json", "manual"), (f"{s}.auto.json", "auto")):
+            path = os.path.join(base, filename)
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError, UnicodeDecodeError) as e:
+                print(f"[CornerAnalysis] Mapa de curvas inválido, ignorando: {path} ({e})")
+                continue
+            cmap = parse_corner_map(data, track_length)
+            if cmap:
+                cmap.source = source
+                if not cmap.track:
+                    cmap.track = track_name
+                return cmap
     return None
 
 
@@ -384,7 +391,7 @@ def detect_corners(telemetry: dict, track_length: float = 0.0,
     if length <= 0:
         return []
 
-    g_abs = _moving_average(lateral_g_series(telemetry), 5)
+    g_abs = _moving_average(lateral_g_series(telemetry), 15)
     n = min(len(g_abs), len(distances))
     if n < 3:
         return []

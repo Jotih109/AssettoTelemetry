@@ -163,13 +163,13 @@ class SessionManager:
                 "sector_times_ms": [0, 0, 0], "timestamp": ""
             },
             "telemetry": {
-                "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "abs_intervention": [], "tc_intervention": [], "g_lat": []
+                "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "gear": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "abs_intervention": [], "tc_intervention": [], "g_lat": []
             }
         }
         
     def reset_current_lap(self):
         self.current_lap_data = {
-            "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "abs_intervention": [], "tc_intervention": [], "g_lat": []
+            "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "gear": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "abs_intervention": [], "tc_intervention": [], "g_lat": []
         }
         self.current_sector_times = [0, 0, 0]
 
@@ -278,7 +278,17 @@ class SessionManager:
                 
             self._update_ideal_lap(state, closed_sector, self.current_sector_times[closed_sector])
             self._last_sector_index = state.sector_index
-        
+
+        # Deltas de setor no estado: setor ainda não fechado fica 0.0. O
+        # engenheiro de pista lê daqui para comentar o setor assim que ele
+        # fecha, sem ter que reimplementar a seleção de referência.
+        for i in range(3):
+            feito = self.current_sector_times[i]
+            ref = self.current_reference_sector_ms[i] if i < len(
+                self.current_reference_sector_ms) else 0
+            delta = (feito - ref) / 1000.0 if feito > 0 and ref > 0 else 0.0
+            setattr(state, f"s{i + 1}_delta", round(delta, 3))
+
         # 2. Checa Fim da Volta
         #
         # Um cruzamento de linha no AC dá DOIS sinais em quadros diferentes: o
@@ -330,6 +340,9 @@ class SessionManager:
         self.current_lap_data["brake"].append(state.brake)
         self.current_lap_data["sector"].append(state.sector_index)
         self.current_lap_data["rpm"].append(state.rpm)
+        # Bruto do jogo (0 = ré, 1 = neutro, 2 = primeira). O engenheiro usa
+        # este canal para comparar a marcha do ápice com a da referência.
+        self.current_lap_data["gear"].append(state.gear)
         self.current_lap_data["steer"].append(state.steer_angle)
         self.current_lap_data["delta"].append(state.delta_time)
         self.current_lap_data["car_x"].append(state.car_x)
@@ -440,7 +453,7 @@ class SessionManager:
             
             # SPLICING (Costura) da Telemetria
             # Manter os pontos que NÃO são do closed_sector
-            new_telemetry = {"times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "g_lat": []}
+            new_telemetry = {"times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "gear": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "g_lat": []}
             
             # Copia os dados do ideal antigo que pertencem aos outros setores
             old_t = ideal_data["telemetry"]
@@ -453,6 +466,7 @@ class SessionManager:
                     new_telemetry["brake"].append(old_t["brake"][i])
                     new_telemetry["sector"].append(old_t["sector"][i])
                     new_telemetry["rpm"].append(old_t.get("rpm", [0]*len(old_t["times"]))[i])
+                    new_telemetry["gear"].append(old_t.get("gear", [0]*len(old_t["times"]))[i])
                     new_telemetry["steer"].append(old_t.get("steer", [0.0]*len(old_t["times"]))[i])
                     new_telemetry["delta"].append(old_t.get("delta", [0.0]*len(old_t["times"]))[i])
                     new_telemetry["car_x"].append(old_t.get("car_x", [0.0]*len(old_t["times"]))[i])
@@ -472,6 +486,7 @@ class SessionManager:
                     new_telemetry["brake"].append(curr_t["brake"][i])
                     new_telemetry["sector"].append(curr_t["sector"][i])
                     new_telemetry["rpm"].append(curr_t["rpm"][i])
+                    new_telemetry["gear"].append(curr_t.get("gear", [0]*len(curr_t["times"]))[i])
                     new_telemetry["steer"].append(curr_t["steer"][i])
                     new_telemetry["delta"].append(curr_t["delta"][i])
                     new_telemetry["car_x"].append(curr_t["car_x"][i])

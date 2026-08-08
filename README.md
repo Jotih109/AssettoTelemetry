@@ -81,18 +81,38 @@
 ---
 
 ### 🎧 Engenheiro de Pista (análise por regras + voz)
-- **Diagnóstico, não só número:** lê as métricas curva a curva e diz o que fazer. Ex.: *"Ferradura: perdeu 0.42 segundos, freou 20 metros antes. Atrase a freada"*.
+- **Diagnóstico, não só número:** lê as métricas curva a curva e diz o que fazer. Ex.: *"Ferradura: perdeu 0.42 segundos, freou 20 metros antes. Atrasa a freada"*.
+- **Foco em pilotagem, não em setup:** o engenheiro fala de tempo, setor, pedal, volante, marcha e traçado — coisas que você muda na volta seguinte, sem sair da pista. Câmber, pressão e ganho de force feedback ficam de fora de propósito (há teste cobrando esse silêncio).
 - **100% local:** regras sobre a telemetria, sem serviço externo e sem modelo de linguagem — custo zero, resposta instantânea e número sempre exato (nunca inventado).
 - **Seletor de modo**, no próprio painel:
   - **Fim de volta** — o balanço da volta que acabou (padrão).
-  - **Ao vivo** — avisos com o carro na pista: roda travando, TC cortando, pneu superaquecido, bandeira, penalidade, combustível.
+  - **Ao vivo** — avisos com o carro na pista: delta contra a referência, setor que fechou, melhor volta em jogo na reta final, roda travando, TC cortando, pneu superaquecido, bandeira, penalidade, combustível, limitador esquecido ligado, dano, última volta, asfalto esfriando, vento.
   - **Sob demanda** — nada aparece sem você clicar em **ANALISAR**.
 - **Texto e voz:** painel com histórico colorido por severidade (crítico / atenção / info) e fala pelo SAPI do Windows. O botão **VOZ** desliga a fala sem apagar o texto.
-- **Escolha automática da melhor voz:** prioriza as vozes **OneCore** do Windows 10/11 (`Microsoft Daniel` / `Microsoft Maria`), muito mais naturais que as `... Desktop` do SAPI clássico — que são as únicas que o Windows enumera por padrão. Em português na frente de qualquer outro idioma. Para preferir voz feminina, troque `PREFERRED_VOICE_NAME` em [core/voice.py](core/voice.py).
+- **Escolha automática da melhor voz:** prioriza as vozes **OneCore** do Windows 10/11 (`Microsoft Daniel` / `Microsoft Maria`), muito mais naturais que as `... Desktop` do SAPI clássico — que são as únicas que o Windows enumera por padrão. Em português na frente de qualquer outro idioma; o desempate por nome fica em `PREFERRED_VOICES`, em [core/voice.py](core/voice.py).
+- **Fila de voz com prioridade:** um recado **crítico** fura a fila e **corta a frase em andamento** — "bandeira preta" não espera o balanço da volta terminar. Recado que envelheceu na fila é descartado em vez de dito atrasado (o piloto já passou da curva), e a fala é síncrona, então duas frases nunca se atropelam.
+- **Voz neural opcional (Kokoro):** com `kokoro-onnx` instalado e o modelo v1.0 em `telemetry_data/models/`, a síntese passa a ser neural, com cache de áudio em disco. Sem os arquivos — ou se a síntese falhar no meio da sessão — o SAPI assume sozinho.
 - **Fala em português de verdade:** o número dito usa vírgula decimal (`0,42`), senão o sintetizador lê "zero ponto quatro dois". O painel mantém o ponto, como o resto do app.
 - **Não metralha o piloto:** cada regra tem tempo de espera próprio, há intervalo mínimo entre falas, e só o essencial vai para a voz (o crítico + a curva onde mais se perdeu). O resto fica no painel.
-- **O que ele analisa:** perda de tempo por curva e a causa (ponto de frenagem, $V_{min}$, ponto de retomada), vício de ABS/TC ao longo da volta com a curva do pior ponto, câmber pela banda de rodagem, autonomia de combustível vs. voltas restantes, consistência entre as últimas voltas, temperatura de pneus e freios, clipping de force feedback.
+- **Silêncio fora da pista:** no box, no pit lane, em replay ou com o jogo pausado o engenheiro não comenta pneu frio nem delta. Só bandeira e penalidade valem em qualquer lugar.
+- **O que ele analisa:**
+
+  | Tema | O que sai pela voz |
+  |---|---|
+  | **Tempo** | delta ao vivo (só quando **muda**), setor que fecha (*"bateu a referência no setor 1, ganhou 0.08"*), melhor volta ameaçada ou na mão na reta final |
+  | **Setores** | resumo verde/amarelo/vermelho da volta, o setor onde o tempo está indo embora, e o **ponto forte** (só depois de virar padrão em 3 voltas) |
+  | **Curva** | perda por curva e a causa: ponto de frenagem (inclusive *"ponto de freio bom, só antecipa uns 5 metros"*), $V_{min}$ com alvo concreto, ponto de retomada, **marcha no ápice** contra a referência, **velocidade de saída**, **desvio de traçado em metros**, e curva de gás cheio em que você freou |
+  | **Pedais** | freio e acelerador sobrepostos, freio solto em degraus, freio **largado de uma vez** (*"solta mais suave, aliviando até o ápice"*) |
+  | **Volante** | subesterço (volante travado com o carro sem virar), suavidade contra a referência — com elogio quando está melhor |
+  | **Motor** | trocas cedo demais fora da faixa de potência, batidas no corte |
+  | **Carro / pista** | pneu e freio quentes, pneus frios num recado só, dano (só quando **piora**), limitador ligado em pista, asfalto esfriando/esquentando, pista verde, vento forte |
+  | **Combustível** | autonomia vs. voltas restantes, consumo alto da volta contra a média |
+  | **Ritmo** | consistência entre as últimas voltas, dita só quando **muda** |
+
+- **Mede antes de opinar:** as medidas de pilotagem (sobreposição de pedais, suavidade de volante, pontos de troca, desvio de traçado) ficam em [core/driving_analysis.py](core/driving_analysis.py), separadas das regras. Toda medida devolve `None` quando o canal não existe — ghost antigo sem marcha ou sem coordenada faz o engenheiro se calar, não chutar.
+- **Canal de marcha:** a marcha passou a ser gravada por volta (é dela que sai o *"passou de 2ª onde a referência usa 3ª"*). Voltas gravadas **antes** desta versão não têm o canal, então o conselho de marcha só aparece quando a volta de referência também for nova.
 - **Fica calado quando está tudo bem** — é o comportamento mais testado da funcionalidade.
+- **Bancada de voz:** `python test_voice.pyw` abre uma janela que monta estados de telemetria e voltas sintéticas de verdade e passa pelo `RaceEngineer`, para ouvir cada aviso (e testar prioridade e preempção) sem entrar na pista.
 
 ---
 
@@ -147,7 +167,8 @@ AssettoCorsa-Telemetry/
 │   ├── models.py           # TelemetryState — estrutura de dados padronizada
 │   ├── corner_analysis.py  # Análise Curva a Curva: mapas, detecção por G e métricas
 │   ├── race_engineer.py    # Engenheiro de pista: regras de diagnóstico e conselho
-│   ├── voice.py            # Voz do engenheiro (SAPI do Windows, opcional)
+│   ├── driving_analysis.py # Medidas de pilotagem: pedais, volante, marcha, traçado
+│   ├── voice.py            # Voz do engenheiro: fila com prioridade, SAPI/Kokoro
 │   ├── session_manager.py  # Gerenciamento de voltas, setores, ghosts e consumo
 │   └── storage.py          # Utilitários de gravação e leitura de dados
 ├── providers/
@@ -162,9 +183,12 @@ AssettoCorsa-Telemetry/
 ├── tests/
 │   ├── test_assettocorsa_provider.py  # Testes de unidade do provider do AC
 │   ├── test_corner_analysis.py        # Testes da análise curva a curva
+│   ├── test_driving_analysis.py       # Testes das medidas de pilotagem
 │   ├── test_race_engineer.py          # Testes das regras do engenheiro de pista
 │   ├── test_session_manager.py        # Testes de persistência e validação de ghosts
-│   └── test_ui_smoke.py               # Testes de fumaça da interface gráfica
+│   ├── test_ui_smoke.py               # Testes de fumaça da interface gráfica
+│   ├── test_voice_queue.py            # Testes da fila de voz (prioridade e descarte)
+│   └── test_voice.pyw                 # Atalho para a bancada de voz (test_voice.pyw)
 ├── track_maps/             # Mapeamento das curvas por pista (manual e detectado)
 ├── exportacoes/            # Screenshots PNG salvas manualmente ou via Best Lap
 ├── telemetry_data/         # Ghosts e voltas gravadas em JSON (por Pista/Carro)

@@ -24,9 +24,19 @@ from ui.components import (
 )
 
 from core import corner_analysis as ca
-from core.race_engineer import RaceEngineer
-from core.voice import VoiceEngine
+from core.race_engineer import RaceEngineer, ATTENTION, CRITICAL, INFO
+from core.voice import (
+    VoiceEngine, PRIORITY_CRITICAL, PRIORITY_LOW, PRIORITY_NORMAL,
+)
 from core.paths import get_app_dir
+
+#: Severidade do recado -> prioridade na fila de voz. Crítico fura a fila e
+#: corta a fala em andamento; INFO é o primeiro a ser descartado se a fila encher.
+_VOICE_PRIORITY = {
+    CRITICAL: PRIORITY_CRITICAL,
+    ATTENTION: PRIORITY_NORMAL,
+    INFO: PRIORITY_LOW,
+}
 
 # Auto-exporta uma imagem PNG da análise sempre que uma nova Melhor Volta (Best Lap)
 # for concluída. Desligue se preferir só exportar manualmente pelo botão da UI.
@@ -947,7 +957,7 @@ class DashboardMainWindow(QMainWindow):
         """
         completed = self.session_manager.completed_laps
         if not completed:
-            return None, ""
+            return None, "", {}
         lap_i = None
         if hasattr(self, "lap_selector"):
             lap_i = self._combo_lap_index(self.lap_selector.combo.currentIndex())
@@ -962,7 +972,8 @@ class DashboardMainWindow(QMainWindow):
                 if candidate.get("metadata", {}).get("full_lap") is not False:
                     lap = candidate
                     break
-        return lap.get("telemetry", {}), lap.get("lap_time_str", "")
+        return (lap.get("telemetry", {}), lap.get("lap_time_str", ""),
+                lap.get("metadata", {}))
 
     def _update_corner_analysis(self):
         """
@@ -991,7 +1002,7 @@ class DashboardMainWindow(QMainWindow):
             self._hide_corner_regions()
             return
 
-        lap_telemetry, _ = self._corner_analysis_lap()
+        lap_telemetry, _, _ = self._corner_analysis_lap()
         if not lap_telemetry:
             self.corner_analysis_table.setRowCount(0)
             self._hide_corner_regions()
@@ -1131,8 +1142,11 @@ class DashboardMainWindow(QMainWindow):
         if not self.engineer.should_speak(now):
             return
         for advice in self.engineer.pick_for_voice(advices, limit=speak_limit):
-            # `spoken`, não `text`: decimal com vírgula para a fala sair natural
-            self.voice.say(advice.spoken)
+            # `spoken`, não `text`: decimal com vírgula para a fala sair natural.
+            # A severidade vira prioridade na fila de voz: um recado crítico
+            # corta o balanço da volta em vez de esperar a vez.
+            self.voice.say(advice.spoken, priority=_VOICE_PRIORITY.get(
+                advice.severity, PRIORITY_NORMAL))
         self.engineer.mark_spoken(now)
 
     def _reference_lap_time_str(self) -> str:
@@ -1151,7 +1165,7 @@ class DashboardMainWindow(QMainWindow):
         if not forced and self.engineer_panel.mode != EngineerPanel.MODE_LAP:
             return
 
-        telemetry, lap_time_str = self._corner_analysis_lap()
+        telemetry, lap_time_str, metadata = self._corner_analysis_lap()
         if not telemetry:
             return
 
@@ -1160,9 +1174,17 @@ class DashboardMainWindow(QMainWindow):
         lap_delta = ((lap_ms - ref_ms) / 1000.0
                      if lap_ms > 0 and ref_ms > 0 else None)
 
+        # A volta de referência entra inteira: é dela que saem as comparações de
+        # marcha no ápice, velocidade de saída e traçado.
+        ref_idx = self.ghost_selector.combo.currentIndex()
+        ref_ghost = self._reference_ghost_for_index(ref_idx)
+
         advices = self.engineer.analyze_lap(
             self._corner_comparisons, lap_telemetry=telemetry, state=state,
-            lap_time_str=lap_time_str, lap_delta_s=lap_delta)
+            lap_time_str=lap_time_str, lap_delta_s=lap_delta,
+            ref_telemetry=ref_ghost.get("telemetry", {}),
+            sector_times_ms=metadata.get("sector_times_ms"),
+            ref_sector_times_ms=ref_ghost.get("metadata", {}).get("sector_times_ms"))
 
         if not advices:
             return
@@ -1174,11 +1196,16 @@ class DashboardMainWindow(QMainWindow):
         """Chamado uma vez por volta concluída."""
         self._engineer_lap_report(state)
 
-        # Consistência só existe na comparação entre voltas, então entra aqui
-        _, lap_time_str = self._corner_analysis_lap()
-        aviso = self.engineer.register_lap_time(self._parse_time_ms(lap_time_str))
-        if aviso and self.engineer_panel.mode != EngineerPanel.MODE_MANUAL:
-            self._engineer_emit([aviso], speak_limit=0)
+        # Ritmo e consumo só existem na comparação entre voltas: é aqui que a
+        # volta que fechou entra na conta.
+        _, lap_time_str, _ = self._corner_analysis_lap()
+        entre_voltas = [
+            self.engineer.register_lap_time(self._parse_time_ms(lap_time_str)),
+            self.engineer.register_fuel(getattr(state, "fuel", 0.0)),
+        ]
+        avisos = [a for a in entre_voltas if a is not None]
+        if avisos and self.engineer_panel.mode != EngineerPanel.MODE_MANUAL:
+            self._engineer_emit(avisos, speak_limit=0)
 
     def _engineer_live_tick(self, state):
         """Avisos com o carro na pista, quando o modo é 'Ao vivo'."""

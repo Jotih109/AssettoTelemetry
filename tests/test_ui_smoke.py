@@ -414,12 +414,17 @@ try:
         o teste não fazer barulho nem depender do SAPI.
         """
         faladas = []
+        prioridades = []
         real_voice = win.voice
 
         class VozFalsa:
             enabled = True
-            def say(self, texto): faladas.append(texto)
-            def clear(self): faladas.clear()
+            def say(self, texto, priority=None):
+                faladas.append(texto)
+                prioridades.append(priority)
+            def clear(self):
+                faladas.clear()
+                prioridades.clear()
             def stop(self): pass
 
         win.voice = VozFalsa()
@@ -441,6 +446,9 @@ try:
             assert faladas, "nada foi falado no modo ao vivo"
             # O mais grave (bandeira/pneu crítico) é o que vai para a voz
             assert "amarela" in faladas[0].lower() or "superaquecido" in faladas[0].lower(), faladas
+            # ...e vai com prioridade de crítico, para furar a fila de voz
+            from core.voice import PRIORITY_CRITICAL
+            assert prioridades[0] == PRIORITY_CRITICAL, prioridades
 
             # --- Botão de voz desliga a fala, mas não o texto ---
             faladas.clear()

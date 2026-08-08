@@ -2,5 +2,13 @@ PyQt5>=5.15.10
 pyqtgraph>=0.13.7
 
 # Opcional — voz do Engenheiro de Pista (SAPI do Windows).
-# Sem isto o app funciona igual: o painel de texto continua, só nao fala.
+# Sem isto o app funciona igual: o painel de texto continua, só não fala.
 pywin32>=306; sys_platform == 'win32'
+
+# Opcional — voz neural (Kokoro), no lugar do SAPI. Além dos pacotes abaixo é
+# preciso baixar o modelo v1.0 para telemetry_data/models/:
+#   kokoro-v1.0.onnx  e  voices-v1.0.bin
+# Sem os dois arquivos o backend nem entra em cena e o SAPI assume.
+# O v0.19 NÃO serve: só tem vozes em inglês.
+# kokoro-onnx>=0.4.0
+# numpy>=1.24

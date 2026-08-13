@@ -120,8 +120,20 @@ class _SpeechQueue:
         with self._cond:
             if self._closed:
                 return
-            if any(u.text == text for u in self._items):
-                return                      # já está na fila: não duplica
+            for u in self._items:
+                if u.text != text:
+                    continue
+                # Já está na fila: não duplica. Mas se a MESMA frase voltou
+                # mais urgente (o aviso de pneu virou crítico), promove a que
+                # está lá — senão o recado urgente seria engolido pelo dedupe
+                # e continuaria valendo como recado comum: não cortaria a fala
+                # em andamento e ainda poderia vencer por idade.
+                if priority < u.priority:
+                    u.priority = priority
+                    u.created_at = now
+                    self._items.sort(key=lambda x: (x.priority, x.seq))
+                    self._cond.notify()
+                return
             self._seq += 1
             self._items.append(_Utterance(text, priority, self._seq, now))
             self._items.sort(key=lambda u: (u.priority, u.seq))
@@ -135,6 +147,11 @@ class _SpeechQueue:
 
         Como a lista está ordenada por (prioridade, ordem de chegada), o
         primeiro item da pior prioridade é justamente o mais velho dela.
+
+        Numa fila só de críticos, sai o crítico mais velho — e é o que se quer:
+        a garantia do PRIORITY_CRITICAL é não vencer por IDADE, não ocupar
+        vaga para sempre. Com a fila cheia de emergências, a mais recente é a
+        que descreve a situação atual do carro.
         """
         pior = self._items[-1].priority
         for i, u in enumerate(self._items):

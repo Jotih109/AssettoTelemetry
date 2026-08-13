@@ -282,8 +282,15 @@ class SessionManager:
         # Deltas de setor no estado: setor ainda não fechado fica 0.0. O
         # engenheiro de pista lê daqui para comentar o setor assim que ele
         # fecha, sem ter que reimplementar a seleção de referência.
+        #
+        # S1 e S2 fecham DENTRO da volta, então saem de current_sector_times.
+        # O S3 só existe depois do tempo oficial chegar — e nesse momento a
+        # volta nova já começou e current_sector_times foi zerado. Por isso o
+        # S3 vem do último fechamento, que é o único lugar onde ele existe.
         for i in range(3):
-            feito = self.current_sector_times[i]
+            fonte = (self.current_sector_times if i < 2
+                     else self.last_completed_sector_times)
+            feito = fonte[i] if i < len(fonte) else 0
             ref = self.current_reference_sector_ms[i] if i < len(
                 self.current_reference_sector_ms) else 0
             delta = (feito - ref) / 1000.0 if feito > 0 and ref > 0 else 0.0

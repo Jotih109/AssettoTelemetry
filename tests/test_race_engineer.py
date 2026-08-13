@@ -370,19 +370,50 @@ def test_setores_volta_bem_distribuida():
 
 
 def test_setor_forte_precisa_de_padrao():
-    """Um setor bom numa volta é sorte; em três voltas é ponto forte."""
+    """
+    Um setor bom numa volta é sorte; em três VOLTAS é ponto forte.
+
+    Cada volta traz tempos ligeiramente diferentes, como na pista de verdade —
+    repetir os mesmos milésimos seria a mesma volta reanalisada, e isso a regra
+    ignora de propósito.
+    """
     eng = RaceEngineer()
     ref = [30000, 30000, 30000]
     primeira = eng.analyze_lap([], sector_times_ms=[30000, 30000, 29700],
                                ref_sector_times_ms=ref)
     assert not por_chave(primeira, "lap:sector_forte"), textos(primeira)
-    for _ in range(2):
-        adv = eng.analyze_lap([], sector_times_ms=[30000, 30000, 29700],
+    adv = None
+    for s3 in (29740, 29680):
+        adv = eng.analyze_lap([], sector_times_ms=[30000, 30000, s3],
                               ref_sector_times_ms=ref)
     forte = por_chave(adv, "lap:sector_forte")
     assert forte, textos(adv)
     assert "setor 3" in forte[0].text, forte[0].text
     return forte[0].text
+
+
+def test_reanalise_nao_inventa_ponto_forte():
+    """
+    O botão ANALISAR reanalisa a MESMA volta quantas vezes o piloto clicar.
+
+    Sem guarda, três cliques virariam "três voltas" e fabricariam um ponto
+    forte que a regra exige justamente que seja padrão entre voltas distintas.
+    """
+    eng = RaceEngineer()
+    ref = [30000, 30000, 30000]
+    adv = None
+    for _ in range(5):                       # cinco cliques na mesma volta
+        adv = eng.analyze_lap([], sector_times_ms=[30000, 30000, 29700],
+                              ref_sector_times_ms=ref)
+    assert not por_chave(adv, "lap:sector_forte"), textos(adv)
+    assert len(eng._sector_history) == 1, eng._sector_history
+
+    # Voltas DIFERENTES continuam contando normalmente
+    for s3 in (29710, 29720):
+        adv = eng.analyze_lap([], sector_times_ms=[30000, 30000, s3],
+                              ref_sector_times_ms=ref)
+    assert por_chave(adv, "lap:sector_forte"), textos(adv)
+    return "5 cliques = 1 volta; 3 voltas distintas = ponto forte"
 
 
 def test_sem_setores_fica_calado():
@@ -853,6 +884,31 @@ def test_live_pista_esfriando_e_esquentando():
     return "asfalto esfriando e esquentando"
 
 
+def test_live_pista_esfriando_nao_engole_a_queda():
+    """
+    A referência de temperatura só anda JUNTO com a fala.
+
+    Se ela avançasse mesmo com o aviso engolido pelo tempo de espera, a pista
+    esfriaria dez graus em silêncio, três a três — cada queda movendo a base e
+    nenhuma sendo dita.
+    """
+    eng = RaceEngineer()
+    eng.analyze_live(state(track_temp=34.0), now=10.0)          # referência
+    primeiro = eng.analyze_live(state(track_temp=30.0), now=20.0)
+    assert any("esfriando" in a.text for a in primeiro), textos(primeiro)
+
+    # Dentro do tempo de espera: cala, mas NÃO perde a queda de vista
+    engolido = eng.analyze_live(state(track_temp=27.0), now=30.0)
+    assert not por_chave(engolido, "track_temp"), textos(engolido)
+
+    # Passado o tempo de espera, a queda acumulada desde 30 graus sai
+    depois = eng.analyze_live(state(track_temp=26.0), now=200.0)
+    aviso = por_chave(depois, "track_temp")
+    assert aviso, textos(depois)
+    assert "30 para 26" in aviso[0].detail, aviso[0].detail
+    return aviso[0].detail
+
+
 def test_live_pista_verde_e_vento():
     eng = RaceEngineer()
     adv = eng.analyze_live(state(surface_grip=0.90, wind_speed=12.0), now=10.0)
@@ -925,6 +981,25 @@ def test_live_dano_so_avisa_quando_piora():
     dano = por_chave(pior, "damage")
     assert dano and dano[0].severity == CRITICAL, textos(pior)
     return "avisa em 30%, cala em 30%, volta a avisar em 70%"
+
+
+def test_live_dano_volta_a_avisar_depois_do_reparo():
+    """
+    Consertou no box: a marca d'água desce junto.
+
+    Sem isso, um amassado novo de 25% depois de um reparo ficaria mudo até
+    superar os 70% de antes — exatamente quando o piloto mais precisa saber.
+    """
+    eng = RaceEngineer()
+    grave = eng.analyze_live(state(car_damage=70.0), now=10.0)
+    assert por_chave(grave, "damage"), textos(grave)
+
+    eng.analyze_live(state(car_damage=0.0), now=100.0)          # reparado
+    novo = eng.analyze_live(state(car_damage=25.0), now=200.0)
+    dano = por_chave(novo, "damage")
+    assert dano, textos(novo)
+    assert "25%" in dano[0].detail, dano[0].detail
+    return "avisa em 70%, repara, volta a avisar em 25%"
 
 
 def test_live_ultima_volta():
@@ -1117,6 +1192,7 @@ for nome, fn in [
     ("setores: aponta o pior", test_setores_apontam_o_pior),
     ("setores: volta bem distribuída", test_setores_volta_bem_distribuida),
     ("setores: ponto forte precisa de padrão", test_setor_forte_precisa_de_padrao),
+    ("setores: reanálise não inventa ponto forte", test_reanalise_nao_inventa_ponto_forte),
     ("setores: sem tempos, silêncio", test_sem_setores_fica_calado),
     ("pedais: freio e acelerador juntos", test_freio_e_acelerador_juntos),
     ("pedais: freio limpo fica calado", test_freio_limpo_fica_calado),
@@ -1151,6 +1227,7 @@ for nome, fn in [
     ("ao vivo: combustível tranquilo só em corrida", test_live_combustivel_tranquilo_so_em_corrida),
     ("ao vivo: penalidade e corta-caminho", test_live_penalidade_e_corta_caminho),
     ("ao vivo: asfalto esfriando e esquentando", test_live_pista_esfriando_e_esquentando),
+    ("ao vivo: queda de temperatura não é engolida", test_live_pista_esfriando_nao_engole_a_queda),
     ("ao vivo: pista verde e vento", test_live_pista_verde_e_vento),
     ("ao vivo: carro saudável fica calado", test_live_carro_saudavel_fica_calado),
     ("ao vivo: no box e no pit lane fica calado", test_live_no_box_fica_calado),
@@ -1158,6 +1235,7 @@ for nome, fn in [
     ("ao vivo: bandeira vale até no box", test_live_bandeira_vale_ate_no_box),
     ("ao vivo: limitador ligado na pista", test_live_limitador_ligado_na_pista),
     ("ao vivo: dano só avisa quando piora", test_live_dano_so_avisa_quando_piora),
+    ("ao vivo: dano volta a avisar depois do reparo", test_live_dano_volta_a_avisar_depois_do_reparo),
     ("ao vivo: última volta", test_live_ultima_volta),
     ("escolha do que vai para a voz", test_escolha_do_que_falar),
     ("texto falado usa vírgula decimal", test_texto_falado_usa_virgula),

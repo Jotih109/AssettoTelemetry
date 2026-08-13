@@ -230,6 +230,7 @@ class RaceEngineer:
         self._last_delta_said = None
         self._sector_said = [None, None, None]
         self._sector_history = []  # uma lista de 3 deltas por volta
+        self._last_sector_signature = None
         self._track_temp_ref = None
         self._fuel_history = []
         self._last_fuel = None
@@ -243,6 +244,7 @@ class RaceEngineer:
         self._last_delta_said = None
         self._sector_said = [None, None, None]
         self._sector_history.clear()
+        self._last_sector_signature = None
         self._track_temp_ref = None
         self._fuel_history.clear()
         self._last_fuel = None
@@ -368,7 +370,7 @@ class RaceEngineer:
         self._live_lap_state(state, add)
         self._live_time(state, add, now)
         self._live_car(state, add, now)
-        self._live_track(state, add)
+        self._live_track(state, add, now)
 
         out.sort(key=lambda a: _SEVERITY_ORDER.get(a.severity, 9))
         return out
@@ -457,6 +459,10 @@ class RaceEngineer:
         # Dano: só quando PIOROU, senão a mesma amassada seria anunciada a
         # cada tempo de espera até o fim da sessão.
         dano = float(getattr(state, "car_damage", 0.0) or 0.0)
+        if dano < self._last_damage:
+            # Consertou no box: a marca d'água tem que descer junto, senão um
+            # amassado novo depois do reparo fica mudo até superar o antigo.
+            self._last_damage = dano
         if (dano >= DAMAGE_WARNING and dano >= self._last_damage + DAMAGE_STEP
                 and self._ready("damage", now)):
             severidade = CRITICAL if dano >= DAMAGE_CRITICAL else ATTENTION
@@ -527,22 +533,24 @@ class RaceEngineer:
 
     # -- ao vivo: a pista -------------------------------------------------
 
-    def _live_track(self, state, add):
+    def _live_track(self, state, add, now: float):
         """Grip disponível: o que a pista está entregando hoje."""
         temp = float(getattr(state, "track_temp", 0.0) or 0.0)
         if temp > 0:
             if self._track_temp_ref is None:
                 self._track_temp_ref = temp
-            elif temp <= self._track_temp_ref - TRACK_TEMP_STEP_C:
-                add("track_temp", INFO,
-                    "Asfalto esfriando, o grip vai cair. Cuidado nas freadas",
-                    f"{self._track_temp_ref:.0f} para {temp:.0f} °C")
-                self._track_temp_ref = temp
-            elif temp >= self._track_temp_ref + TRACK_TEMP_STEP_C:
-                add("track_temp", INFO,
-                    "Asfalto mais quente agora, tem mais grip disponível",
-                    f"{self._track_temp_ref:.0f} para {temp:.0f} °C")
-                self._track_temp_ref = temp
+            elif abs(temp - self._track_temp_ref) >= TRACK_TEMP_STEP_C:
+                # A referência só anda JUNTO com a fala. Movê-la mesmo quando o
+                # tempo de espera engoliu o aviso faria a pista esfriar dez
+                # graus em silêncio, três a três.
+                if self._ready("track_temp", now):
+                    esfriou = temp < self._track_temp_ref
+                    add("track_temp", INFO,
+                        "Asfalto esfriando, o grip vai cair. Cuidado nas freadas"
+                        if esfriou
+                        else "Asfalto mais quente agora, tem mais grip disponível",
+                        f"{self._track_temp_ref:.0f} para {temp:.0f} °C")
+                    self._track_temp_ref = temp
 
         grip = float(getattr(state, "surface_grip", 1.0) or 1.0)
         if 0 < grip < GREEN_TRACK_GRIP:
@@ -630,8 +638,14 @@ class RaceEngineer:
         if all(d is None for d in deltas):
             return []
 
-        self._sector_history.append(deltas)
-        self._sector_history = self._sector_history[-CONSISTENCY_LAPS:]
+        # O botão ANALISAR reanalisa a MESMA volta quantas vezes o piloto
+        # clicar. Sem esta guarda, três cliques viram "três voltas" e fabricam
+        # um ponto forte que `_strong_sector` exige justamente que seja padrão.
+        assinatura = tuple(sector_times_ms[:3]) + tuple(ref_sector_times_ms[:3])
+        if assinatura != self._last_sector_signature:
+            self._last_sector_signature = assinatura
+            self._sector_history.append(deltas)
+            self._sector_history = self._sector_history[-CONSISTENCY_LAPS:]
 
         def cor(d):
             if d is None:

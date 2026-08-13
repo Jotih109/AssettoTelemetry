@@ -57,7 +57,14 @@ LIMITER_FRACTION = 0.985
 
 
 def _floats(seq) -> List[float]:
-    """Converte para float e descarta o que não for número."""
+    """
+    Converte o canal para float, trocando o que não for número por 0.0.
+
+    Substituir em vez de descartar é deliberado: os canais são lidos POR
+    ÍNDICE (a amostra 40 do freio tem que ser a mesma amostra 40 da
+    velocidade), e remover um buraco deslocaria todo o resto do canal — um
+    erro silencioso e muito pior que um zero isolado.
+    """
     out = []
     for v in (seq or []):
         try:

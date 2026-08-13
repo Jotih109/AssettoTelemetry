@@ -107,6 +107,37 @@ def test_nao_duplica_a_mesma_frase():
     return "frase repetida entra uma vez só"
 
 
+def test_frase_repetida_mais_urgente_e_promovida():
+    """
+    A mesma frase pode voltar mais grave: o pneu que estava "esquentando"
+    passa a estar "superaquecido" com o MESMO texto na fila.
+
+    Se o dedupe simplesmente descartasse a nova, o recado urgente ficaria
+    valendo como recado comum — não cortaria a fala em andamento e ainda
+    poderia ser descartado por idade.
+    """
+    q = fila()
+    q.put("Pneu dianteiro esquerdo superaquecido", PRIORITY_LOW, now=0.0)
+    q.put("Pneu dianteiro esquerdo superaquecido", PRIORITY_CRITICAL, now=1.0)
+
+    assert q.peek_priority() == PRIORITY_CRITICAL, "não promoveu"
+    fala = q.get()
+    assert fala.priority == PRIORITY_CRITICAL, fala.priority
+    assert q.peek_priority() is None, "entrou duas vezes"
+    # E, promovida, não vence mais por idade
+    assert not fala.is_stale(now=1.0 + MAX_AGE_S + 10.0)
+    return "frase repetida sobe de prioridade em vez de ser engolida"
+
+
+def test_frase_repetida_menos_urgente_nao_rebaixa():
+    """O contrário não vale: crítico na fila não pode virar recado comum."""
+    q = fila()
+    q.put("Bandeira preta, entra nos boxes", PRIORITY_CRITICAL, now=0.0)
+    q.put("Bandeira preta, entra nos boxes", PRIORITY_LOW, now=1.0)
+    assert q.peek_priority() == PRIORITY_CRITICAL, "rebaixou o crítico"
+    return "crítico na fila não é rebaixado por repetição"
+
+
 # ---------------------------------------------------------------------------
 # Validade
 # ---------------------------------------------------------------------------
@@ -184,6 +215,8 @@ for nome, fn in [
     ("descarta o mais antigo da menor prioridade", test_descarta_o_mais_antigo_da_menor_prioridade),
     ("crítico nunca é descartado", test_critico_nunca_e_descartado),
     ("não duplica a mesma frase", test_nao_duplica_a_mesma_frase),
+    ("frase repetida mais urgente é promovida", test_frase_repetida_mais_urgente_e_promovida),
+    ("frase repetida menos urgente não rebaixa", test_frase_repetida_menos_urgente_nao_rebaixa),
     ("recado velho perde a validade", test_recado_velho_perde_a_validade),
     ("crítico não vence por idade", test_critico_nao_vence),
     ("fila fechada libera a thread", test_fila_fechada_libera_a_thread),

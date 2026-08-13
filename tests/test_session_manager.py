@@ -246,6 +246,34 @@ try:
     check("delta contra volta inteira fica coerente",
           abs(st_delta.delta_time) < 1.0, f"{st_delta.delta_time:+.3f}s")
 
+    # --- 8b. Deltas de setor no estado --------------------------------------
+    # O engenheiro de pista lê s1/s2/s3_delta do estado. S1 e S2 fecham DENTRO
+    # da volta; o S3 só existe depois do tempo oficial chegar — quando a volta
+    # nova já começou e os tempos correntes foram zerados. Sem tratar esse
+    # caso, o S3 fica estruturalmente em 0.0 e o aviso nunca sai.
+    sm_sec = SessionManager(data_dir=os.path.join(work, "setores"))
+    _lap_frames(sm_sec, 1, "")
+    _cross_line(sm_sec, 2, "", "1:29.745")
+
+    # Referência um pouco mais lenta em cada setor: os três deltas ficam < 0
+    ref_ms = [t + 200 for t in sm_sec.last_completed_sector_times]
+    ghost = {"metadata": {"lap_time_str": "1:30.345", "sector_times_ms": ref_ms},
+             "telemetry": sm_sec.session_best_lap_ghost["telemetry"]}
+
+    st_sec = _state(current_time="0:10.000", last_time="1:29.745",
+                    distance_traveled=TRACK_M * 0.1, track_position=0.1,
+                    lap_number=2, sector_index=0)
+    sm_sec.process_state(st_sec, reference_ghost=ghost)
+
+    check("S3 do estado sai do último fechamento (não fica preso em zero)",
+          st_sec.s3_delta < 0.0,
+          f"s1={st_sec.s1_delta:+.3f} s2={st_sec.s2_delta:+.3f} "
+          f"s3={st_sec.s3_delta:+.3f}")
+    check("S3 do estado bate com o tempo medido",
+          abs(st_sec.s3_delta - (sm_sec.last_completed_sector_times[2]
+                                 - ref_ms[2]) / 1000.0) < 0.002,
+          f"{st_sec.s3_delta:+.3f}s")
+
     # --- 9. Volta parcial não pode virar referência -------------------------
     # App aberto no MEIO de uma volta: a telemetria começa em 24% da pista.
     # Ela tem tempo de volta válido (o jogo informa), mas não serve de

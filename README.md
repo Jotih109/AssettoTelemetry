@@ -187,8 +187,7 @@ AssettoCorsa-Telemetry/
 │   ├── test_race_engineer.py          # Testes das regras do engenheiro de pista
 │   ├── test_session_manager.py        # Testes de persistência e validação de ghosts
 │   ├── test_ui_smoke.py               # Testes de fumaça da interface gráfica
-│   ├── test_voice_queue.py            # Testes da fila de voz (prioridade e descarte)
-│   └── test_voice.pyw                 # Atalho para a bancada de voz (test_voice.pyw)
+│   └── test_voice_queue.py            # Testes da fila de voz (prioridade e descarte)
 ├── track_maps/             # Mapeamento das curvas por pista (manual e detectado)
 ├── exportacoes/            # Screenshots PNG salvas manualmente ou via Best Lap
 ├── telemetry_data/         # Ghosts e voltas gravadas em JSON (por Pista/Carro)

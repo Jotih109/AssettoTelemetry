@@ -18,6 +18,7 @@ telemetry.json
 # Editores
 .vscode/
 .idea/
+.claude/
 
 # Logs
 log.txt

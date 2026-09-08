@@ -51,10 +51,12 @@ Quer só analisar as voltas de ontem? `python mapa.pyw`.
 | [Análise curva a curva](#-análise-curva-a-curva-turn-by-turn) | ponto de freada, $V_{min}$, retomada |
 | [Biblioteca de voltas](#-biblioteca-de-voltas-histórico-e-exportação) | como as voltas são guardadas |
 | [Análise pós-sessão](#-tela-de-análise-pós-sessão-mapapyw) | comparar até 4 voltas, offline |
+| [**Relatórios de desempenho**](#-relatórios-de-desempenho--diagnóstico-causal-onde-melhorar-e-por-quê) | pontos positivos, negativos, onde melhorar e por quê |
+| [**Exportação MoTeC i2**](#-exportação-motec-i2-ld--ldx-para-motec-i2-pro) | telemetria nativa no MoTeC i2 Pro |
 | [Onde ficam os dados](#-onde-ficam-os-dados) | o que cada arquivo em disco é |
 | [Preferências](#-preferências-persistentes-configjson) | todas as chaves do `config.json` |
 | [Como executar](#-como-executar) | modos, argumentos e variáveis |
-| [Testes](#-testes-automatizados) | 529 verificações |
+| [Testes](#-testes-automatizados) | 554 verificações |
 | [Solução de problemas](#-solução-de-problemas) | quando algo não aparece |
 | [O que ainda falta](#-o-que-ainda-falta--planejado) | roadmap honesto |
 
@@ -296,6 +298,8 @@ No catálogo, cada sessão fica **agrupada e identificável**: a tela de anális
 - **Arquivos 6x menores.** Cada canal é arredondado para a precisão que ele realmente carrega e o arquivo vai comprimido. Uma volta de 90 s a 60 Hz saía a **1,5 MB**; agora fica entre **~80 e ~250 KB**, dependendo de quanto o sinal varia (medido: 51 KB no simulador do fim de semana, 180 KB numa volta do provider mock, 250 KB no pior caso possível — dados aleatórios, que não comprimem). Vale também para a volta ideal, que fica fora do catálogo (é sintética — ninguém a deu) mas tem o tamanho de uma volta inteira: crua, ela era o maior arquivo da pasta.
 - **Personal Best sem perder o anterior.** O PB deixou de ser um arquivo sobrescrito a cada recorde: ele é DERIVADO do catálogo. Bater o recorde não apaga a volta antiga — ela continua na lista e pode voltar a ser referência.
 - **Exportação:**
+  - **MoTeC i2 Pro (.ld / .ldx):** exportação nativa no formato binário oficial do MoTeC com suporte a Pro Logging (`0xC81A4`), canais a 60 Hz e arquivo de marcas de volta/setores em XML (`.ldx`).
+  - **Relatório de Desempenho (.md / .txt):** diagnóstico técnico de engenharia com pontos fortes, pontos fracos, causas raízes baseadas na física da telemetria e plano de ação corretivo para a próxima volta.
   - **CSV** de qualquer volta, pela tela de análise pós-sessão — uma coluna por canal, para abrir em planilha ou cruzar com o que você quiser.
   - **PNG** da tela de análise, manual pelo botão ou automático a cada novo Personal Best.
 - **Nada se perde na atualização:** o `best_lap_ghost.json` das versões anteriores é importado para o catálogo (e fixado com alfinete) na primeira vez que você entra na pista, e as voltas soltas em JSON são catalogadas de onde estão.
@@ -309,13 +313,170 @@ Aplicação separada, **offline** — não conecta no jogo e não grava nada:
 python mapa.pyw
 ```
 
-- **Navegador do catálogo:** árvore Pista → Carro → Sessão → Volta, com o tempo e a data de cada uma.
+- **Navegador do catálogo:** árvore Pista → Carro → Sessão → Volta, com o tempo, data e indicadores de cada volta.
 - **Comparação de até 4 voltas sobrepostas** (Ctrl+clique), cada uma com sua cor, em velocidade, acelerador, freio e volante — mais o **delta** de cada uma contra a primeira selecionada, interpolado por distância.
 - **Traçado no mapa** das voltas selecionadas e leitura dos valores sob o cursor, sincronizada entre todos os gráficos.
 - **Eixo X por distância ou por tempo.**
-- **Gerência do catálogo:** fixar volta com alfinete (protege da limpeza), exportar CSV e apagar.
+- **Barra de Ações e Menu de Contexto:**
+  - **`RELATÓRIO`:** abre o visualizador analítico completo de desempenho (pontos positivos, negativos, causas de tempo perdido e plano de ação).
+  - **`MoTeC (.ld)`:** exporta a volta selecionada diretamente para o formato binário MoTeC i2 Pro com arquivo `.ldx` acompanhante.
+  - **`CSV`:** exporta todos os canais e registros de amostragem da volta selecionada em planilha `.csv`.
+  - **`📌 FIXAR`:** fixa com alfinete, blindando a volta contra a política de retenção e limpeza automática.
+  - **`APAGAR`:** remove permanentemente as voltas selecionadas do índice e do disco.
+  - **`ATUALIZAR`:** recarrega a árvore de voltas a partir do sistema de arquivos.
 
 > Esta tela tinha um sistema de gravação só dela (`telemetry_sessions/`), com nomes de canal diferentes dos do dashboard — `x`/`z`/`throttle` em vez de `car_x`/`car_z`/`gas`. Na prática ela nunca conseguiria abrir uma volta gravada pelo app principal. Agora as duas leem o mesmo catálogo.
+
+---
+
+### 📊 Relatórios de Desempenho & Diagnóstico Causal (Onde Melhorar e Por Quê)
+
+Mais do que apenas exibir curvas de telemetria na tela, o ApexView conta com um motor analítico de engenharia de pista ([core/lap_report.py](core/lap_report.py)) projetado para responder com precisão matemática às três perguntas essenciais de qualquer piloto:
+1. *Onde exatamente eu ganhei ou perdi tempo?*
+2. *Qual foi o mecanismo físico e dinâmico que causou essa perda?*
+3. *O que devo mudar concretamente na pilotagem na próxima volta?*
+
+O gerador pode ser acionado diretamente na tela de análise pós-sessão (`mapa.pyw`) clicando no botão **RELATÓRIO** ou clicando com o botão direito sobre qualquer volta da árvore.
+
+#### 🔍 Como o Relatório é Estruturado:
+
+1. **Metadados e Resumo Geral:**
+   - Tempo da volta analisada, tempo da volta de referência (Personal Best ou outra volta da sessão), delta total e status de validade.
+   - Decomposição por setores (**S1, S2, S3**) com os tempos individuais e os respectivos deltas contra a referência.
+   - Diagnóstico de consistência e ritmo geral.
+
+2. **Tabela Turn-by-Turn Quantitativa:**
+   - Tabela comparativa curva a curva da pista com métricas extraídas por interpolação cinemática:
+     - **Delta da Curva ($\Delta t$):** tempo ganho (verde) ou perdido (vermelho) no trecho delimitado da curva.
+     - **Ponto de Frenagem ($m$):** metro da pista onde o pedal de freio superou 10%, comparado metro a metro contra a referência.
+     - **Velocidade Mínima no Ápice ($V_{min}$ em $km/h$):** velocidade no ápice geométrico/dinâmico e déficit de velocidade.
+     - **Ponto de Retomada ($m$):** metro da pista onde o acelerador alcançou 100% na saída de curva.
+
+3. **Principais Pontos Positivos (O Que Funcionou):**
+   - Curvas onde o piloto superou a volta de referência.
+   - Explicação física causal do ganho: *frenagem tardia executada sem travamento de rodas*, *alta sustentação de $V_{min}$ no ápice sem espalhar*, *retomada de aceleração antecipada com tração eficiente sem intervenção abusiva do TC*.
+
+4. **Principais Pontos Negativos (Onde o Tempo Foi Perdido):**
+   - Destaque das curvas com maior perda de tempo, ranqueadas por magnitude de prejuízo (em décimos e centésimos de segundo).
+   - Apontamento imediato do setor onde a volta foi comprometida.
+
+5. **Onde Melhorar e O Porquê (Diagnóstico Causal Detalhado):**
+   - Cada ponto crítico de perda é destrinchado em três dimensões claras:
+     - **Diagnóstico do Problema:** Ex.: *Curva 6 (Ferradura) — Entrada lenta e freada muito antecipada (+0.340s)*.
+     - **O Porquê (Causa Raiz Física):** Ex.: *O freio foi acionado 22 metros antes da referência e a velocidade no ápice caiu para 114 km/h vs 123 km/h da volta ideal. O carro desacelerou cedo demais na reta de aproximação e descarregou o eixo dianteiro antes da hora.*
+     - **Ação Prática Corretiva (O que fazer):** Ex.: *Atrase o ponto de frenagem em cerca de 15 a 18 metros usando a placa dos 100m como referência; mantenha leve pressão de freio (trail braking) para ajudar a frente a apontar para o ápice.*
+
+6. **Avaliação Geral da Técnica de Pilotagem:**
+   - **Pedais (Acelerador e Freio):**
+     - Detecção de **sobreposição indesejada** de acelerador e freio (overlapping).
+     - Modulação de freio: identificação de **freio largado abruptamente em degrau** (que desestabiliza a transferência de carga) versus transição suave até o ápice (trail braking).
+   - **Volante e Direção:**
+     - Nível de suavidade e correções bruscas de volante.
+     - Detecção de **subesterço severo** (ângulos altos de volante com baixa resposta de Força G lateral).
+   - **Câmbio e Rotação:**
+     - Comparativo de **marcha engatada no ápice** contra a referência (evitando motor sufocado em rotação baixa na saída ou corte prematuro de giro).
+   - **Intervenções de Eletrônica (ABS e TC):**
+     - Percentual de tempo em frenagem com atuação intensa do ABS (indício de excesso de pressão inicial no pedal).
+     - Atuação de Controle de Tração (corte de potência por excesso de aceleração com o volante ainda esterçado).
+
+7. **Potencial Teórico de Tempo:**
+   - Estimativa calculada do tempo que pode ser recuperado apenas corrigindo os principais gargalos identificados.
+
+#### 💻 Interface e Exportação no `mapa.pyw`:
+
+- **Diálogo Interativo (`LapReportDialog`):**
+  - **Seletor de Referência Dinâmico:** permite alternar entre o **Personal Best** da pista/carro ou **qualquer outra volta da sessão** gravada (ideal para comparar a evolução de um stint de corrida).
+  - **Alternância de Visualização:**
+    - **Modo Markdown:** renderizado com formatação visual moderna, cabeçalhos destacados, tabelas e cores temáticas.
+    - **Modo Texto Puro:** formatação limpa monoespaçada em 80 colunas, com divisórias em arte ASCII e alinhamento perfeito de colunas.
+  - **Copiar com 1 Clique:** botão para copiar o relatório completo para a área de transferência (ótimo para colar no Discord, WhatsApp ou bloco de notas de corrida).
+  - **Exportar Arquivo:** botão para salvar o relatório em arquivo `.md` ou `.txt`.
+
+```text
+================================================================================
+           APEXVIEW — RELATÓRIO DE DESEMPENHO E ENGENHARIA DE TELEMETRIA        
+================================================================================
+
+Pista: Autodromo Jose Carlos Pace
+Carro: Porsche 992 GT3 Cup
+Volta: 7 | Tempo: 1:32.450
+Referência: Personal Best | Tempo: 1:31.980 (Delta: +0.470s)
+
+--------------------------------------------------------------------------------
+SETOR 1: 38.120s  (Delta: +0.110s)
+SETOR 2: 32.480s  (Delta: +0.320s)  <-- MAIOR PERDA
+SETOR 3: 21.850s  (Delta: +0.040s)
+--------------------------------------------------------------------------------
+
+>>> PRINCIPAIS PONTOS POSITIVOS:
+  [+] Curva 1 (S do Senna) — Frenagem no limite e boa tração na saída (-0.080s)
+      Justificativa: Ponto de freio 5m depois da referência sem travamento de ABS,
+      permitindo manter velocidade de entrada com retomada limpa.
+
+>>> ONDE MELHORAR E O PORQUÊ:
+  [!] Curva 6 (Ferradura) — Entrada lenta e freada antecipada (+0.320s)
+      Por que: Frenagem iniciada 19 metros antes da referência (182m vs 163m) e
+      V_min no ápice de 116.2 km/h vs 124.8 km/h. O carro desacelerou cedo demais.
+      Ação Prática: Atrase o freio em 15m usando a placa dos 100m como referência.
+      Carregue mais velocidade para o ápice aproveitando a compressão da curva.
+
+>>> TÉCNICA DE PILOTAGEM:
+  - Pedais: Sobreposição leve de acelerador e freio detectada na entrada da Curva 4.
+  - Volante: Suavidade boa, sem indícios de subesterço crônico.
+  - Eletrônica: ABS atuou em 28% do tempo de frenagem forte; alivie o pedal no final.
+================================================================================
+```
+
+---
+
+### 🏎️ Exportação MoTeC i2 (.ld / .ldx) para MoTeC i2 Pro
+
+O **MoTeC i2 Pro** é o padrão definitivo da indústria para engenharia de dados e análise de telemetria no automobilismo profissional e no automobilismo virtual competitivo. O ApexView possui um exportador nativo de baixo nível ([core/motec/](core/motec/)) capaz de converter diretamente as voltas gravadas do Assetto Corsa em arquivos de telemetria MoTeC binários (`.ld`) e metadados de marcas e setores em XML (`.ldx`).
+
+#### ⚡ Recursos do Exportador MoTeC:
+
+- **Compatibilidade MoTeC i2 Pro ("Pro Logging"):**
+  - Arquivo binário estruturado segundo a especificação MoTeC Logged Data versão 1.1.
+  - Emite a assinatura mágica de desbloqueio `PRO_LOGGING_MAGIC = 0xC81A4`, liberando todos os recursos avançados de análise matemática, gráficos multicanal e histogramas do MoTeC i2 Pro sem limitações da versão padrão.
+- **Arquivo de Marcas XML (`.ldx`) Sincronizado:**
+  - Gera simultaneamente o arquivo acompanhante `.ldx` no mesmo diretório com o mesmo nome do `.ld`.
+  - Registra as marcas temporais exatas de abertura e fechamento de volta (beacon), além das divisórias dos setores **S1, S2 e S3**. O MoTeC abre o arquivo já com as voltas e parciais divididas na régua de tempo, sem necessidade de configuração manual de balizas.
+- **Reamostragem e Interpolação Uniforme a 60 Hz:**
+  - Todo o sinal temporal é alinhado a uma base fixa de 60 Hz, eliminando *jitter* temporal e inconsistências na taxa de quadros.
+- **Canais de Telemetria Exportados:**
+
+  | Canal MoTeC | Unidade | Descrição |
+  |---|---|---|
+  | `Speed` | km/h | Velocidade linear do veículo |
+  | `Throttle` | % | Curso do pedal de acelerador (0 a 100%) |
+  | `Brake` | % | Pressão do pedal de freio (0 a 100%) |
+  | `Steer` | deg | Ângulo de esterçamento do volante em graus reais |
+  | `Gear` | — | Marcha selecionada (-1 = Ré, 0 = Neutro, 1 a N) |
+  | `RPM` | rpm | Rotações por minuto do motor |
+  | `G_Lat` | g | Força G lateral (aceleração em curva) |
+  | `G_Long` | g | Força G longitudinal (aceleração / frenagem) |
+  | `G_Vert` | g | Força G vertical (oscilação e compressão) |
+  | `SlipAngle` | deg | Ângulo de escorregamento do veículo |
+  | `WheelSpeed FL` | km/h | Velocidade da roda dianteira esquerda |
+  | `WheelSpeed FR` | km/h | Velocidade da roda dianteira direita |
+  | `WheelSpeed RL` | km/h | Velocidade da roda traseira esquerda |
+  | `WheelSpeed RR` | km/h | Velocidade da roda traseira direita |
+  | `Clutch` | % | Posição da embreagem |
+
+- **Metadados de Sessão Embutidos:**
+  - Cabeçalho binário enriquecido com nome do piloto (`Driver`), carro (`Vehicle`), circuito (`Venue`) e data/hora oficial da sessão.
+- **Como Exportar:**
+  - Na tela de análise pós-sessão (`mapa.pyw`), clique na volta desejada e selecione o botão **`MoTeC (.ld)`** (ou clique com botão direito na volta e escolha *Exportar MoTeC i2 (.ld)*).
+  - Pelo Python via `LapLibrary` ou facilitador:
+    ```python
+    from core.lap_library import LapLibrary
+    from core.motec_exporter import export_lap_to_motec
+
+    lib = LapLibrary()
+    record = lib.best_lap("spa", "ferrari_488_gt3")
+    # Exportação através da biblioteca:
+    lib.export_motec("spa", "ferrari_488_gt3", record, "spa_melhor_volta.ld")
+    ```
 
 ---
 
@@ -387,6 +548,13 @@ AssettoCorsa-Telemetry/
 │   ├── live_coach.py       # Coach de curva: dica antes da freada, veredito na saída
 │   ├── corner_bests.py     # A melhor passagem de cada curva, guardada entre sessões
 │   ├── driving_analysis.py # Medidas de pilotagem: pedais, volante, marcha, traçado
+│   ├── lap_report.py       # Motor analítico: diagnóstico causal, pontos fortes/fracos e relatórios (.md/.txt)
+│   ├── motec/              # Pacote exportador MoTeC i2 Pro (.ld binário e .ldx XML)
+│   │   ├── channel_mapping.py # Mapeamento e interpolação uniforme de canais a 60 Hz
+│   │   ├── exporter.py     # Orquestrador de exportação de voltas
+│   │   ├── ld_writer.py    # Gerador binário do arquivo .ld (com Pro Logging 0xC81A4)
+│   │   └── ldx_writer.py   # Gerador de marcas de volta e divisórias de setores em XML (.ldx)
+│   ├── motec_exporter.py   # Ponto de entrada facilitador para exportação MoTeC i2
 │   ├── voice.py            # Voz do engenheiro: fila com prioridade, SAPI/Kokoro
 │   ├── session_manager.py  # Gerenciamento de voltas, setores, ghosts e consumo
 │   ├── lap_library.py      # Catálogo de voltas: índice leve, compressão, retenção
@@ -409,8 +577,10 @@ AssettoCorsa-Telemetry/
 │   ├── test_corner_bests.py           # Aprendizado do coach entre sessões
 │   ├── test_driving_analysis.py       # Medidas de pilotagem
 │   ├── test_lap_library.py            # Catálogo: índice, compressão, retenção
+│   ├── test_lap_report.py             # Testes do motor de diagnóstico causal e relatórios
 │   ├── test_live_coach.py             # Disciplina do coach: quando fala e quando cala
 │   ├── test_mapa_smoke.py             # Fumaça da análise pós-sessão
+│   ├── test_motec_exporter.py         # Testes de exportação MoTeC binária (.ld) e marcas (.ldx)
 │   ├── test_race_engineer.py          # Regras do engenheiro de pista
 │   ├── test_session_manager.py        # Persistência, ghosts, volta suja, troca de sessão
 │   ├── test_ui_smoke.py               # Fumaça da interface gráfica
@@ -480,6 +650,8 @@ build_exe.bat
 
 ## ⌨️ Controles da Interface
 
+### 🖥️ Dashboard Principal (`main.pyw`)
+
 | Onde | O que faz |
 |---|---|
 | **REFERÊNCIA** (combo no topo) | Contra qual volta você está sendo medido — modos fixos ou qualquer volta gravada. |
@@ -492,17 +664,32 @@ build_exe.bat
 | **ANALISAR** | Roda o balanço da volta exibida na hora, em qualquer modo. |
 | **Modo** (painel do engenheiro) | Fim de volta / Ao vivo / Sob demanda. |
 
+### 🗺️ Tela de Análise Pós-Sessão (`mapa.pyw`)
+
+| Onde | O que faz |
+|---|---|
+| **RELATÓRIO** | Abre o visualizador analítico: pontos fortes, fracos, causas e ações com exportação `.md`/`.txt` e cópia para clipboard. |
+| **MoTeC (.ld)** | Exporta a volta selecionada para arquivo binário nativo MoTeC i2 Pro (`.ld` + `.ldx`). |
+| **CSV** | Exporta todos os pontos e canais da volta selecionada em formato de planilha `.csv`. |
+| **📌 FIXAR** | Protege a volta selecionada contra a política de retenção e limpeza automática. |
+| **APAGAR** | Remove a volta selecionada do catálogo e apaga o arquivo `.json.gz` do disco. |
+| **ATUALIZAR** | Recarrega e sincroniza a árvore de pistas, carros e sessões diretamente do disco. |
+| **Ctrl + Clique** | Seleciona até 4 voltas para sobreposição gráfica simultânea com curvas de delta. |
+| **Distância / Tempo** | Alterna o eixo horizontal entre metros percorridos e tempo decorrido. |
+
 ---
 
 ## 🧪 Testes Automatizados
 
-Cada arquivo é um script que roda sozinho e imprime o placar (não precisa de pytest). **529 verificações**, todas passando:
+Cada arquivo é um script que roda sozinho e imprime o placar (não precisa de pytest). **554 verificações**, todas passando:
 
 ```bash
 python tests/test_race_weekend.py         # ⭐ o fim de semana inteiro, ponta a ponta
 python tests/test_live_coach.py           # disciplina do coach: quando fala e quando cala
 python tests/test_corner_bests.py         # aprendizado do coach entre sessões
 python tests/test_lap_library.py          # catálogo: índice, compressão, retenção
+python tests/test_lap_report.py           # motor de diagnóstico causal e relatórios
+python tests/test_motec_exporter.py       # exportação MoTeC binária (.ld) e marcas (.ldx)
 python tests/test_session_manager.py      # persistência, ghosts, volta suja, troca de sessão
 python tests/test_ui_smoke.py             # interface do dashboard
 python tests/test_mapa_smoke.py           # interface da análise pós-sessão
@@ -563,6 +750,8 @@ O piloto sintético é parametrizável ([tests/weekend_sim.py](tests/weekend_sim
 
 - [x] ~~**Tela de Análise Pós-Sessão (`mapa.pyw`)**~~ — feita, e agora lendo o mesmo catálogo do dashboard.
 - [x] ~~**Comparação de Telemetria de Múltiplas Voltas**~~ — até 4 voltas sobrepostas na tela de análise pós-sessão. Falta trazer isso para o dashboard ao vivo.
+- [x] ~~**Exportação MoTeC i2 Pro (`.ld` / `.ldx`)**~~ — feita ([core/motec/](core/motec/)), no padrão da indústria com Pro Logging (`0xC81A4`) e marcas de volta/setores em XML.
+- [x] ~~**Relatórios de Desempenho & Diagnóstico Causal**~~ — feito ([core/lap_report.py](core/lap_report.py)), com análise profunda de pontos positivos, gargalos, causas físicas e plano de ação em Markdown e Texto Puro.
 - [x] ~~**Configurações Persistentes do Usuário (`config.json`)**~~ — feita ([core/config.py](core/config.py)).
 - [x] ~~**Coaching em tempo real durante a volta**~~ — feito ([core/live_coach.py](core/live_coach.py)).
 - [x] ~~**Separação por sessão dentro do fim de semana**~~ — feito, com detecção automática.

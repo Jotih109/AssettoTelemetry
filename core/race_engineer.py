@@ -186,6 +186,10 @@ class Advice:
     corner: Optional[int] = None
     kind: str = "lap"           # "live" (na pista) ou "lap" (fim de volta)
     time_at_stake: float = 0.0  # segundos em jogo, usado para ordenar
+    #: Validade do recado em segundos: depois disso é melhor não dizer nada.
+    #: `None` = vale o padrão da fila de voz. Só recado com hora marcada
+    #: precisa disto — uma dica de curva vale até a freada, e não depois.
+    ttl_s: Optional[float] = None
 
     @property
     def display(self) -> str:

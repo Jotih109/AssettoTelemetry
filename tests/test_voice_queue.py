@@ -208,6 +208,53 @@ def test_motor_desligado_nao_enfileira():
     return "desligada não enfileira e encerra limpo"
 
 
+def test_validade_propria_do_recado():
+    """
+    Recado com hora marcada traz a própria validade.
+
+    Uma dica de "Ferradura chegando" vale os três segundos até a freada. Dita
+    dez segundos depois — porque a fila estava ocupada — ela chega em cima de
+    OUTRA curva e manda o piloto frear no lugar errado. Pior que não falar.
+    """
+    q = fila()
+    q.put("Ferradura chegando", PRIORITY_NORMAL, 0.0, ttl=3.5)
+    q.put("Asfalto esquentando", PRIORITY_NORMAL, 0.0)
+    dica = next(u for u in q._items if u.text.startswith("Ferradura"))
+    contexto = next(u for u in q._items if u.text.startswith("Asfalto"))
+
+    assert not dica.is_stale(2.0), "a dica venceu antes da hora"
+    assert dica.is_stale(5.0), "a dica seguiu válida depois da freada"
+    assert not contexto.is_stale(5.0),         "recado de contexto não devia usar a validade curta"
+    assert contexto.is_stale(MAX_AGE_S + 1.0), "o padrão deixou de valer"
+    return "validade curta na dica, padrão no resto"
+
+
+def test_critico_ignora_a_validade_propria():
+    """Nem uma validade curta faz um recado crítico ser descartado."""
+    q = fila()
+    q.put("Bandeira preta", PRIORITY_CRITICAL, 0.0, ttl=1.0)
+    critico = q._items[0]
+    assert not critico.is_stale(999.0), "recado crítico venceu por idade"
+    return "crítico nunca vence, com ou sem validade"
+
+
+def test_promocao_atualiza_a_validade():
+    """
+    A mesma frase de volta, mais urgente, herda a validade nova.
+
+    Sem isso, um recado promovido continuaria carregando a validade curta do
+    original e poderia vencer antes de ser dito.
+    """
+    q = fila()
+    q.put("Pneu superaquecido", PRIORITY_LOW, 0.0, ttl=2.0)
+    q.put("Pneu superaquecido", PRIORITY_NORMAL, 10.0, ttl=None)
+    u = q._items[0]
+    assert u.priority == PRIORITY_NORMAL, "não foi promovido"
+    assert u.ttl is None, f"validade não acompanhou a promoção: {u.ttl}"
+    assert not u.is_stale(11.0), "venceu com a validade antiga"
+    return "promoção traz a validade nova junto"
+
+
 for nome, fn in [
     ("crítico fura a fila", test_critico_fura_a_fila),
     ("ordem de chegada dentro da prioridade", test_ordem_de_chegada_dentro_da_prioridade),
@@ -219,6 +266,10 @@ for nome, fn in [
     ("frase repetida menos urgente não rebaixa", test_frase_repetida_menos_urgente_nao_rebaixa),
     ("recado velho perde a validade", test_recado_velho_perde_a_validade),
     ("crítico não vence por idade", test_critico_nao_vence),
+    ("recado com hora marcada traz a própria validade",
+     test_validade_propria_do_recado),
+    ("crítico ignora a validade própria", test_critico_ignora_a_validade_propria),
+    ("promoção atualiza a validade", test_promocao_atualiza_a_validade),
     ("fila fechada libera a thread", test_fila_fechada_libera_a_thread),
     ("pontuação de escolha da voz", test_pontuacao_de_voz),
     ("voz desligada não enfileira", test_motor_desligado_nao_enfileira),

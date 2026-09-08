@@ -619,7 +619,7 @@ def analyze_corner(telemetry: dict, corner: Corner, track_length: float = 0.0,
     return metrics
 
 
-def _search_bounds(corners: List[Corner], i: int, track_length: float):
+def search_bounds(corners: List[Corner], i: int, track_length: float):
     """
     Até onde a busca da curva `i` pode ir para trás e para frente: o fim da
     curva anterior e o início da próxima. É o que impede duas curvas seguidas
@@ -636,7 +636,7 @@ def analyze_lap(telemetry: dict, corners: List[Corner],
     length = float(track_length or 0.0) or max(telemetry.get("distance") or [0.0])
     out = []
     for i, corner in enumerate(corners):
-        from_m, to_m = _search_bounds(corners, i, length)
+        from_m, to_m = search_bounds(corners, i, length)
         out.append(analyze_corner(telemetry, corner, length, from_m, to_m))
     return out
 
@@ -653,7 +653,7 @@ def compare_laps(lap_telemetry: dict, ref_telemetry: dict, corners: List[Corner]
     length = float(track_length or 0.0) or max(lap_telemetry.get("distance") or [0.0])
     out = []
     for i, corner in enumerate(corners):
-        from_m, to_m = _search_bounds(corners, i, length)
+        from_m, to_m = search_bounds(corners, i, length)
         lap_m = analyze_corner(lap_telemetry, corner, length, from_m, to_m)
         ref_m = (analyze_corner(ref_telemetry, corner, length, from_m, to_m)
                  if ref_has_data else None)

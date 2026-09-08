@@ -25,10 +25,13 @@ from ui.components import (
 
 from core import corner_analysis as ca
 from core.race_engineer import RaceEngineer, ATTENTION, CRITICAL, INFO
+from core.live_coach import LiveCoach
+from core.corner_bests import CornerBestStore, map_signature
 from core.voice import (
     VoiceEngine, PRIORITY_CRITICAL, PRIORITY_LOW, PRIORITY_NORMAL,
 )
 from core.paths import get_app_dir
+from core.config import get_config
 
 #: Severidade do recado -> prioridade na fila de voz. Crítico fura a fila e
 #: corta a fala em andamento; INFO é o primeiro a ser descartado se a fila encher.
@@ -38,14 +41,16 @@ _VOICE_PRIORITY = {
     INFO: PRIORITY_LOW,
 }
 
-# Auto-exporta uma imagem PNG da análise sempre que uma nova Melhor Volta (Best Lap)
-# for concluída. Desligue se preferir só exportar manualmente pelo botão da UI.
-AUTO_EXPORT_ON_BEST_LAP = True
 EXPORT_DIR = get_app_dir("exportacoes")
 
-# A engine emite a 60 Hz. Os cards numéricos acompanham tudo, mas as curvas
-# dos gráficos são redesenhadas 1 a cada N quadros — redesenhar milhares de
-# pontos 60 vezes por segundo travaria a interface. 5 => ~12 fps de gráfico.
+# Padrões que agora moram no config.json (core/config.py) e podem ser mudados
+# sem editar código: auto-exportar PNG a cada melhor volta, e de quantos em
+# quantos quadros as curvas são redesenhadas.
+#
+# A engine emite a 60 Hz. Os cards numéricos acompanham tudo, mas redesenhar
+# milhares de pontos 60 vezes por segundo travaria a interface — 5 quadros
+# dão ~12 fps de gráfico, imperceptível ao olho.
+AUTO_EXPORT_ON_BEST_LAP = True
 GRAPH_REDRAW_EVERY_N_FRAMES = 5
 
 
@@ -61,8 +66,24 @@ class DashboardMainWindow(QMainWindow):
         self.setMinimumSize(1280, 720)
 
         self.setStyleSheet(T.app_qss())
-        
-        self.session_manager = SessionManager()
+
+        # Preferências do usuário (config.json na raiz do app). Lidas antes de
+        # montar a interface: a retenção de voltas e a referência padrão
+        # dependem delas.
+        self.config = get_config()
+        self.session_manager = SessionManager(
+            retention=self.config.retention_policy())
+        #: Referência escolhida na sessão anterior, reaplicada quando o
+        #: catálogo de voltas da pista/carro é carregado
+        self._pending_reference = None
+        self._ref_cache_key = None
+        self._ref_cache_value = None
+        # Preferência do usuário, limitada pelo interruptor do módulo: o teste
+        # de fumaça zera AUTO_EXPORT_ON_BEST_LAP para não sujar exportacoes/.
+        self.auto_export_on_best = bool(
+            self.config.get("auto_export_on_best_lap"))
+        self.graph_every_n_frames = max(
+            1, int(self.config.get("graph_redraw_every_n_frames")))
         self.last_track_car_signature = ""
         self._last_time_seen = ""
         self._graph_x_max = 120.0
@@ -79,15 +100,38 @@ class DashboardMainWindow(QMainWindow):
 
         # --- Engenheiro de pista ---
         self.engineer = RaceEngineer()
+        #: Coach de curva: fala ANTES e LOGO DEPOIS de cada curva, enquanto o
+        #: piloto ainda pode fazer alguma coisa a respeito (core/live_coach.py)
+        self.coach = LiveCoach()
+        #: Guarda a melhor passagem de cada curva entre sessões, para o coach
+        #: não recomeçar do zero no Treino 2 (core/corner_bests.py)
+        self.corner_bests = CornerBestStore(self.session_manager.library)
+        self._coach_seed_signature = None
+        self._corner_best_cache = ({}, [])
         self.voice = VoiceEngine(enabled=True)
         self._engineer_last_lap_count = 0
         self._engineer_clock = 0.0   # segundos desde o início da sessão
+        self._session_index_seen = 0
+        self._laps_recorded_seen = 0
 
         self.init_ui()
-        
-        # Conecta o seletor de Referência
-        self.ghost_selector.combo.currentIndexChanged.connect(self.on_ghost_mode_changed)
-        
+
+        # O seletor de Referência é conectado uma única vez, em init_ui().
+        # Havia um segundo connect() aqui: o Qt permite ligar o mesmo slot duas
+        # vezes, então cada troca de referência redesenhava tudo em dobro.
+
+        # Restaura a referência que estava selecionada na última sessão. As
+        # voltas do catálogo ainda não foram lidas (só chegam ao entrar na
+        # pista), então uma referência do tipo "lap" é reaplicada em
+        # refresh_reference_choices().
+        kind, lap_id = self.config.reference()
+        self._pending_reference = (kind, lap_id)
+        self.ghost_selector.combo.blockSignals(True)
+        self.ghost_selector.set_selection(kind, lap_id)
+        self.ghost_selector.combo.blockSignals(False)
+
+        self._restore_engineer_preferences()
+
         # Conecta o sinal da Thread (Engine) para atualizar a UI
         self.engine.on_update.connect(self.on_telemetry_update)
         
@@ -703,7 +747,9 @@ class DashboardMainWindow(QMainWindow):
         self.render_selected_lap(lap_info)
 
     def render_selected_lap(self, lap_info: dict):
-        telemetry = lap_info.get("telemetry", {})
+        # A telemetria vem do catálogo sob demanda: `completed_laps` guarda só
+        # os metadados da volta.
+        telemetry = self.session_manager.telemetry_for(lap_info)
         times = telemetry.get("times", [])
         if not times:
             return
@@ -722,9 +768,7 @@ class DashboardMainWindow(QMainWindow):
             for i in range(len(brake_100))
         ]
 
-        ref_idx = self.ghost_selector.combo.currentIndex()
-        ref_ghost = self._reference_ghost_for_index(ref_idx)
-        delta_arr = self._calc_lap_delta(telemetry, ref_ghost)
+        delta_arr = self._calc_lap_delta(telemetry, self.reference_ghost())
 
         self.curve_delta.setData(times, delta_arr)
         self.curve_speed.setData(times, telemetry.get("speed", []))
@@ -785,21 +829,35 @@ class DashboardMainWindow(QMainWindow):
         self.btn_live_state.setText("[ ⏸ ANÁLISE ]")
         self.btn_live_state.setStyleSheet(self.btn_live_state.styleSheet().replace("#ff3333", "#eedd82"))
         
+    def _displayed_lap_telemetry(self) -> dict:
+        """
+        Telemetria da volta que está desenhada nos gráficos: a selecionada no
+        seletor de voltas ou, no modo ao vivo, a volta em andamento.
+        """
+        if hasattr(self, "lap_selector"):
+            lap_i = self._combo_lap_index(self.lap_selector.combo.currentIndex())
+            completed = self.session_manager.completed_laps
+            if lap_i is not None and lap_i < len(completed):
+                telemetry = self.session_manager.telemetry_for(completed[lap_i])
+                if telemetry.get("times"):
+                    return telemetry
+        return self.session_manager.current_lap_data
+
     def on_scrubber_moved(self, value):
         if self.is_live: return
         self.lbl_track_pos_pct.setText(f"{value / 10.0:.1f}%")
         
-        idx = self.ghost_selector.combo.currentIndex()
-        ghost = self._reference_ghost_for_index(idx)
-        if idx == 0:
-            lap_data = self.session_manager.current_lap_data
-            track_len = getattr(self._last_state, 'track_length', 4309.0) if hasattr(self, '_last_state') else 4309.0
-        else:
-            lap_data = ghost.get("telemetry", {})
-            distances = lap_data.get("distance", [])
-            track_len = max(distances) if distances else 4309.0
-            
+        # O cursor anda sobre a volta que está DESENHADA. Antes ele andava
+        # sobre o ghost de referência quando havia uma escolhida, e sobre a
+        # volta atual quando não havia: arrastar o cursor movia o marcador do
+        # mapa por uma volta enquanto os gráficos embaixo eram de outra.
+        lap_data = self._displayed_lap_telemetry()
         distances = lap_data.get("distance", [])
+        track_len = (getattr(self._last_state, 'track_length', 0.0) or 0.0
+                     if self._last_state is not None else 0.0)
+        if track_len <= 0:
+            track_len = max(distances) if distances else 4309.0
+
         times = lap_data.get("times", [])
         x_arr = lap_data.get("car_x", [])
         z_arr = lap_data.get("car_z", [])
@@ -830,8 +888,7 @@ class DashboardMainWindow(QMainWindow):
 
     def _update_sector_lines(self):
         """Reposition S1/S2 vertical lines using actual sector boundaries from the selected reference ghost."""
-        idx = self.ghost_selector.combo.currentIndex()
-        ghost = self._reference_ghost_for_index(idx).get("telemetry", {})
+        ghost = self.reference_ghost().get("telemetry", {})
         times = ghost.get("times", [])
         sectors = ghost.get("sector", [])
         if len(times) < 2 or len(sectors) < 2:
@@ -873,20 +930,32 @@ class DashboardMainWindow(QMainWindow):
         da pista, e as faixas nos gráficos não bateram com a volta.
         """
         length = float(getattr(self._last_state, "track_length", 0.0) or 0.0)
-        candidates = [
-            self.session_manager.session_best_lap_ghost.get("telemetry", {}),
-            self.session_manager.best_lap_ghost.get("telemetry", {}),
-        ]
-        candidates += [lap.get("telemetry", {})
-                       for lap in reversed(self.session_manager.completed_laps)]
-        for telem in candidates:
-            if len(telem.get("distance", [])) < 50:
+        sm = self.session_manager
+
+        def usable(telem):
+            return (telem and len(telem.get("distance", [])) >= 50
+                    and (telem.get("g_lat") or len(telem.get("car_x", [])) >= 50)
+                    and ca.lap_coverage(telem, length) >= 0.95)
+
+        # Os dois ghosts já estão na memória: começa por eles.
+        for ghost in (sm.session_best_lap_ghost, sm.best_lap_ghost):
+            telem = ghost.get("telemetry", {})
+            if usable(telem):
+                return telem
+
+        # Nenhum serve: procura no catálogo, da volta mais recente para a mais
+        # antiga. O índice diz quais voltas são inteiras e quais canais elas
+        # têm, então só as candidatas de verdade saem do disco — antes isto
+        # abria a telemetria de TODAS as voltas da sessão.
+        for record in sm.completed_laps[::-1]:
+            rec = record.get("record")
+            if rec is None or not rec.full_lap or rec.points < 50:
                 continue
-            if not (telem.get("g_lat") or len(telem.get("car_x", [])) >= 50):
+            if not ("g_lat" in rec.channels or "car_x" in rec.channels):
                 continue
-            if ca.lap_coverage(telem, length) < 0.95:
-                continue
-            return telem
+            telem = sm.telemetry_for(record)
+            if usable(telem):
+                return telem
         return {}
 
     def _refresh_corner_map(self):
@@ -972,8 +1041,68 @@ class DashboardMainWindow(QMainWindow):
                 if candidate.get("metadata", {}).get("full_lap") is not False:
                     lap = candidate
                     break
-        return (lap.get("telemetry", {}), lap.get("lap_time_str", ""),
-                lap.get("metadata", {}))
+        return (self.session_manager.telemetry_for(lap),
+                lap.get("lap_time_str", ""), lap.get("metadata", {}))
+
+    def _seed_coach_from_history(self):
+        """
+        Dá ao coach o que ele já aprendeu nesta pista, com este carro.
+
+        Roda uma vez por combinação (pista, carro, mapa de curvas). Lê o
+        arquivo de melhores passagens e, se ele estiver vazio ou desatualizado,
+        varre as voltas mais rápidas do catálogo para preenchê-lo — o que
+        custa ~110 ms para cinco voltas e acontece uma vez só, não a cada
+        sessão.
+        """
+        track, car = self.session_manager.track_car
+        if not track or not self._corners:
+            return
+        fonte = self._corner_map.source if self._corner_map else ""
+        assinatura = map_signature(self._corners, fonte)
+        if self._coach_seed_signature == (track, car, assinatura):
+            return
+        self._coach_seed_signature = (track, car, assinatura)
+
+        bests, vistas = self.corner_bests.load(track, car, assinatura)
+        bests, vistas, lidas = self.corner_bests.bootstrap(
+            track, car, self._corners,
+            self._corner_track_length or getattr(self._last_state, "track_length", 0.0),
+            known=bests, seen_laps=vistas)
+        if lidas:
+            self.corner_bests.save(track, car, assinatura, bests, vistas)
+        self._corner_best_cache = (bests, vistas)
+
+        self.coach.set_track(self._corners,
+                             self._corner_track_length
+                             or getattr(self._last_state, "track_length", 0.0))
+        n = self.coach.load_bests(bests)
+        if n:
+            print(f"[Coach] {n} curva(s) com melhor passagem conhecida"
+                  + (f" ({lidas} volta(s) do catálogo analisadas)" if lidas else "")
+                  + ": o coach já sabe onde você perde.")
+
+    def _persist_corner_bests(self):
+        """Grava as passagens que melhoraram nesta volta."""
+        if not self.coach.bests_dirty:
+            return
+        track, car = self.session_manager.track_car
+        if not track or not self._coach_seed_signature:
+            return
+        assinatura = self._coach_seed_signature[2]
+        bests, vistas = self._corner_best_cache
+        atuais = self.coach.export_bests()
+        for index, best in atuais.items():
+            anterior = bests.get(index)
+            if anterior is None or best.section_s < anterior.section_s:
+                bests[index] = best
+        entry = (self.session_manager.completed_laps[-1]
+                 if self.session_manager.completed_laps else {})
+        record = entry.get("record")
+        if record is not None and record.lap_id not in vistas:
+            vistas.append(record.lap_id)
+        self._corner_best_cache = (bests, vistas)
+        self.corner_bests.save(track, car, assinatura, bests, vistas)
+        self.coach.mark_bests_saved()
 
     def _update_corner_analysis(self):
         """
@@ -1008,8 +1137,7 @@ class DashboardMainWindow(QMainWindow):
             self._hide_corner_regions()
             return
 
-        ref_idx = self.ghost_selector.combo.currentIndex()
-        ref_telemetry = self._reference_ghost_for_index(ref_idx).get("telemetry", {})
+        ref_telemetry = self.reference_ghost().get("telemetry", {})
 
         length = self._corner_track_length or max(lap_telemetry.get("distance", [0.0]) or [0.0])
         self._corner_comparisons = ca.compare_laps(
@@ -1104,16 +1232,41 @@ class DashboardMainWindow(QMainWindow):
     # Engenheiro de pista
     # -----------------------------------------------------------------------
 
+    #: Modo do engenheiro <-> chave gravada no config.json. O índice do combo
+    #: não vai para o disco: mudar a ordem dos itens trocaria a preferência de
+    #: todo mundo em silêncio.
+    _ENGINEER_MODE_KEYS = {EngineerPanel.MODE_LAP: "lap",
+                           EngineerPanel.MODE_LIVE: "live",
+                           EngineerPanel.MODE_MANUAL: "manual"}
+
     def on_engineer_voice_toggled(self, checked: bool):
         self.voice.enabled = checked
         if not checked:
             self.voice.clear()   # cala o que ainda não foi falado
+        self.config.set("voice_enabled", bool(checked))
 
     def on_engineer_mode_changed(self, idx: int):
         nomes = {EngineerPanel.MODE_LAP: "no fim de cada volta",
                  EngineerPanel.MODE_LIVE: "ao vivo, durante a volta",
                  EngineerPanel.MODE_MANUAL: "só quando você pedir"}
         print(f"[Engenheiro] Modo: {nomes.get(idx, '?')}")
+        self.config.set("engineer_mode", self._ENGINEER_MODE_KEYS.get(idx, "lap"))
+
+    def _restore_engineer_preferences(self):
+        """Reaplica voz e modo do engenheiro salvos na sessão anterior."""
+        voice_on = bool(self.config.get("voice_enabled"))
+        self.voice.enabled = voice_on
+        panel = self.engineer_panel
+        panel.btn_voice.blockSignals(True)
+        panel.btn_voice.setChecked(voice_on)
+        panel.btn_voice.blockSignals(False)
+
+        saved = self.config.engineer_mode()
+        idx = next((i for i, key in self._ENGINEER_MODE_KEYS.items()
+                    if key == saved), EngineerPanel.MODE_LAP)
+        panel.combo_mode.blockSignals(True)
+        panel.combo_mode.setCurrentIndex(idx)
+        panel.combo_mode.blockSignals(False)
 
     def on_engineer_analyze_clicked(self):
         """Botão ANALISAR: roda o balanço da volta exibida, em qualquer modo."""
@@ -1145,14 +1298,14 @@ class DashboardMainWindow(QMainWindow):
             # `spoken`, não `text`: decimal com vírgula para a fala sair natural.
             # A severidade vira prioridade na fila de voz: um recado crítico
             # corta o balanço da volta em vez de esperar a vez.
-            self.voice.say(advice.spoken, priority=_VOICE_PRIORITY.get(
-                advice.severity, PRIORITY_NORMAL))
+            self.voice.say(advice.spoken,
+                           priority=_VOICE_PRIORITY.get(advice.severity,
+                                                        PRIORITY_NORMAL),
+                           ttl=advice.ttl_s)
         self.engineer.mark_spoken(now)
 
     def _reference_lap_time_str(self) -> str:
-        idx = self.ghost_selector.combo.currentIndex()
-        ghost = self._reference_ghost_for_index(idx)
-        return ghost.get("metadata", {}).get("lap_time_str", "") or ""
+        return self.reference_ghost().get("metadata", {}).get("lap_time_str", "") or ""
 
     def _engineer_lap_report(self, state, forced: bool = False):
         """
@@ -1176,8 +1329,7 @@ class DashboardMainWindow(QMainWindow):
 
         # A volta de referência entra inteira: é dela que saem as comparações de
         # marcha no ápice, velocidade de saída e traçado.
-        ref_idx = self.ghost_selector.combo.currentIndex()
-        ref_ghost = self._reference_ghost_for_index(ref_idx)
+        ref_ghost = self.reference_ghost()
 
         advices = self.engineer.analyze_lap(
             self._corner_comparisons, lap_telemetry=telemetry, state=state,
@@ -1185,6 +1337,13 @@ class DashboardMainWindow(QMainWindow):
             ref_telemetry=ref_ghost.get("telemetry", {}),
             sector_times_ms=metadata.get("sector_times_ms"),
             ref_sector_times_ms=ref_ghost.get("metadata", {}).get("sector_times_ms"))
+
+        # O resumo do coach fecha o balanço: quanto tempo ainda há na mesa e
+        # em que curvas ele está. Vem por último de propósito — é o recado que
+        # o piloto leva para a volta seguinte.
+        resumo = self.coach.lap_summary()
+        if resumo is not None:
+            advices = list(advices) + [resumo]
 
         if not advices:
             return
@@ -1194,6 +1353,21 @@ class DashboardMainWindow(QMainWindow):
 
     def _engineer_on_lap_completed(self, state):
         """Chamado uma vez por volta concluída."""
+        # O coach aprende com a MESMA comparação que alimenta a tabela de
+        # curvas — mas nunca com uma volta de box ou com corte de pista.
+        entry = (self.session_manager.completed_laps[-1]
+                 if self.session_manager.completed_laps else {})
+        self._seed_coach_from_history()
+        self.coach.on_lap_completed(self._corner_comparisons,
+                                    pit_lap=bool(entry.get("pit_lap")),
+                                    valid=bool(entry.get("valid", True)))
+        self._persist_corner_bests()
+
+        if entry.get("pit_lap"):
+            # Balanço de uma volta de saída/retorno não diz nada: ela é vinte
+            # segundos mais lenta por definição.
+            return
+
         self._engineer_lap_report(state)
 
         # Ritmo e consumo só existem na comparação entre voltas: é aqui que a
@@ -1208,10 +1382,22 @@ class DashboardMainWindow(QMainWindow):
             self._engineer_emit(avisos, speak_limit=0)
 
     def _engineer_live_tick(self, state):
-        """Avisos com o carro na pista, quando o modo é 'Ao vivo'."""
+        """
+        Avisos com o carro na pista, quando o modo é 'Ao vivo'.
+
+        Duas fontes: o engenheiro (bandeira, pneu, delta, combustível) e o
+        coach de curva (dica antes da curva, veredito na saída). O coach entra
+        depois porque o que ele diz é conselho — bandeira preta vem primeiro.
+        """
         if self.engineer_panel.mode != EngineerPanel.MODE_LIVE:
             return
         advices = self.engineer.analyze_live(state, self._engineer_clock)
+
+        self.coach.set_track(self._corners, self._corner_track_length
+                             or getattr(state, "track_length", 0.0))
+        self.coach.set_reference(self.reference_ghost().get("telemetry", {}))
+        advices += self.coach.update(state, self.session_manager.current_lap_data,
+                                     self._engineer_clock)
         if advices:
             self._engineer_emit(advices, speak_limit=1)
 
@@ -1219,28 +1405,131 @@ class DashboardMainWindow(QMainWindow):
     # Main telemetry update slot
     # -----------------------------------------------------------------------
 
-    def _reference_ghost_for_index(self, idx: int) -> dict:
-        """Maps the Ghost Selector combo index to the corresponding stored ghost.
+    # -----------------------------------------------------------------------
+    # Referência (volta fantasma)
+    # -----------------------------------------------------------------------
 
-        Quando idx == 0 ('Desativado'), as curvas do ghost não são exibidas
-        nos gráficos, mas ainda usamos o session best como referência numérica
-        (delta, ref, est). Assim o piloto sempre vê valores significativos.
+    def reference_ghost(self) -> dict:
         """
-        if idx == 1:   # Personal Best
-            return self.session_manager.best_lap_ghost
-        elif idx == 2:  # Session Record
-            return self.session_manager.session_best_lap_ghost
-        elif idx == 3:  # Ideal Lap
-            return self.session_manager.ideal_lap_ghost
-        # idx == 0 (Desativado): usa session best como referência automática
-        # se disponível, senão usa o personal best, senão ghost vazio.
-        sbg = self.session_manager.session_best_lap_ghost
-        if sbg.get("telemetry", {}).get("times"):
-            return sbg
-        blg = self.session_manager.best_lap_ghost
-        if blg.get("telemetry", {}).get("times"):
-            return blg
-        return self.session_manager._empty_ghost()
+        Ghost da referência selecionada. Ponto único de verdade.
+
+        Antes cada trecho da janela chamava `_reference_ghost_for_index()` com
+        o índice cru do combo (0..3) — nove lugares dependendo da ORDEM dos
+        itens de um menu. Agora o combo diz o que ele é (`kind`, `lap_id`) e a
+        resolução acontece só aqui.
+
+        O resultado é memorizado por quadro: a 60 Hz, uma volta do catálogo
+        seria procurada no índice dezenas de vezes por segundo à toa.
+        """
+        kind, lap_id = self.ghost_selector.selection()
+        cache_key = (kind, lap_id, self.session_manager.ghosts_revision)
+        if getattr(self, "_ref_cache_key", None) == cache_key:
+            return self._ref_cache_value
+
+        ghost = self._resolve_reference(kind, lap_id)
+        self._ref_cache_key = cache_key
+        self._ref_cache_value = ghost
+        return ghost
+
+    def _resolve_reference(self, kind: str, lap_id: str) -> dict:
+        sm = self.session_manager
+        G = GhostSelectorCard
+
+        if kind == G.REF_NONE:
+            # "Nenhuma" agora desativa de verdade. Antes ela só escondia as
+            # curvas e continuava medindo o delta contra o session best — um
+            # número que o piloto não tinha pedido e não sabia de onde vinha.
+            return sm._empty_ghost()
+        if kind == G.REF_PB:
+            return sm.best_lap_ghost
+        if kind == G.REF_SESSION:
+            return sm.session_best_lap_ghost
+        if kind == G.REF_IDEAL:
+            return sm.ideal_lap_ghost
+        if kind == G.REF_LAP and lap_id:
+            ghost = sm.ghost_for_lap_id(lap_id)
+            if ghost.get("telemetry", {}).get("times"):
+                return ghost
+            # A volta escolhida sumiu do disco: melhor cair na automática do
+            # que deixar o piloto sem delta nenhum e sem saber por quê.
+            print(f"[Referência] Volta {lap_id} não está mais disponível: "
+                  "voltando para a referência automática.")
+            self.ghost_selector.set_selection(G.REF_AUTO)
+
+        return self.best_available_reference()
+
+    def best_available_reference(self) -> dict:
+        """
+        A referência da opção "Automática".
+
+        Em treino e classificação, a MAIS RÁPIDA que existir. Antes esta
+        função devolvia a melhor volta da sessão sempre que houvesse uma,
+        mesmo com o Personal Best mais rápido — e num dia ruim isso fazia o
+        piloto perseguir o próprio ritmo ruim, com o delta verde enquanto ele
+        andava segundos abaixo do que já tinha feito ali.
+
+        NA CORRIDA é diferente, e de propósito: vale a melhor volta DESTA
+        sessão. Perseguir a volta de classificação com o tanque cheio e pneu
+        usado é perseguir um tempo que o carro não tem hoje — o delta ficaria
+        em "+2 segundos" a corrida inteira e não diria nada sobre a volta que
+        acabou de ser feita.
+        """
+        sm = self.session_manager
+        session_ghost = sm.session_best_lap_ghost
+        tem_sessao = bool(session_ghost.get("telemetry", {}).get("times"))
+
+        state = self._last_state
+        em_corrida = state is not None and RaceEngineer._is_race(state)
+        if em_corrida and tem_sessao:
+            return session_ghost
+
+        candidatos = []
+        for ghost in (session_ghost, sm.best_lap_ghost):
+            if not ghost.get("telemetry", {}).get("times"):
+                continue
+            ms = self._parse_time_ms(
+                ghost.get("metadata", {}).get("lap_time_str", "") or "")
+            candidatos.append((ms if ms > 0 else 9999999, ghost))
+        if not candidatos:
+            return sm._empty_ghost()
+        return min(candidatos, key=lambda item: item[0])[1]
+
+    def reference_shows_ghost(self) -> bool:
+        """As curvas fantasma devem aparecer nos gráficos e no mapa?"""
+        return self.ghost_selector.shows_ghost()
+
+    def refresh_reference_choices(self):
+        """
+        Refaz a lista do seletor com as voltas que existem agora.
+
+        Chamado quando uma volta fecha e ao trocar de pista/carro. As voltas
+        desta sessão vêm primeiro; abaixo, as gravadas em outros dias.
+        """
+        sm = self.session_manager
+        session_ids = {e.get("record").lap_id for e in sm.completed_laps
+                       if e.get("record") is not None}
+        saved = [r for r in sm.saved_laps(only_reference_material=True)
+                 if r.lap_id not in session_ids]
+
+        combo = self.ghost_selector.combo
+        combo.blockSignals(True)
+        self.ghost_selector.populate(
+            session_laps=list(reversed(sm.completed_laps)),
+            saved_laps=saved)
+
+        # A referência salva na sessão anterior pode ser uma volta específica,
+        # que só existe na lista depois que o catálogo desta pista/carro é
+        # lido. Tenta reaplicá-la até conseguir; se a volta não existir mais
+        # (retenção, arquivo apagado, outra pista), desiste e fica no que está.
+        if self._pending_reference is not None:
+            kind, lap_id = self._pending_reference
+            if self.ghost_selector.set_selection(kind, lap_id):
+                self._pending_reference = None
+            elif kind != GhostSelectorCard.REF_LAP:
+                self._pending_reference = None
+        combo.blockSignals(False)
+
+        self._ref_cache_key = None
 
     def on_telemetry_update(self, state: TelemetryState):
         if not state.is_connected:
@@ -1252,8 +1541,7 @@ class DashboardMainWindow(QMainWindow):
 
         # 1. PROCESS STATE FIRST! This calculates Live Delta and Sectors,
         #    using whichever reference lap is currently selected in the sidebar.
-        idx = self.ghost_selector.combo.currentIndex()
-        reference_ghost = self._reference_ghost_for_index(idx)
+        reference_ghost = self.reference_ghost()
         self.session_manager.process_state(state, reference_ghost=reference_ghost)
         self._update_sector_lines()
         
@@ -1309,7 +1597,9 @@ class DashboardMainWindow(QMainWindow):
         self.card_best.set_value(best_time_str)
 
         # Auto-exporta uma imagem sempre que uma NOVA melhor volta é registrada
-        if AUTO_EXPORT_ON_BEST_LAP and best_time_str != "--:--.---" and best_time_str != self._last_exported_best:
+        if (AUTO_EXPORT_ON_BEST_LAP and self.auto_export_on_best
+                and best_time_str != "--:--.---"
+                and best_time_str != self._last_exported_best):
             self._last_exported_best = best_time_str
             completed_lap_number = max(1, state.lap_number - 1)
             self.export_analysis_image(auto=True, lap_number=completed_lap_number, lap_time_str=best_time_str)
@@ -1317,28 +1607,13 @@ class DashboardMainWindow(QMainWindow):
         # Escala dinâmica do eixo X dos gráficos, baseada na melhor volta / comprimento da pista
         self._update_graph_scale(state, best_time_str)
 
-        # Determine Reference Time based on Ghost Selector (idx already read above)
-        # Always pull the time from the ghost's own metadata to stay consistent with
-        # the telemetry data used for delta calculation.
-        has_valid_reference = False
-        ref_lap_str = "--:--.---"
-
-        if idx == 0:  # Desativado — usa session best ou personal best como ref automática
-            sbg_str = self.session_manager.session_best_lap_ghost["metadata"].get("lap_time_str", "") or ""
-            blg_str = self.session_manager.best_lap_ghost["metadata"].get("lap_time_str", "") or ""
-            ref_lap_str = sbg_str or blg_str or "--:--.---"
-        elif idx == 1: # Personal Best
-            ref_lap_str = (
-                self.session_manager.best_lap_ghost["metadata"].get("lap_time_str", "")
-                or best_time_str
-            )
-        elif idx == 2: # Session Record
-            ref_lap_str = self.session_manager.session_best_lap_ghost["metadata"].get("lap_time_str", "--:--.---") or "--:--.---"
-        elif idx == 3: # Ideal Lap
-            ref_lap_str = self.session_manager.ideal_lap_ghost["metadata"].get("lap_time_str", "--:--.---") or "--:--.---"
-
-        if self._parse_time_ms(ref_lap_str) > 0:
-            has_valid_reference = True
+        # Tempo da referência: sai SEMPRE dos metadados do próprio ghost, para
+        # ficar coerente com a telemetria que o delta está usando. Um único
+        # `reference_ghost()` cobre os cinco modos e qualquer volta do catálogo
+        # — antes eram quatro ramos dependendo da posição no combo.
+        ref_lap_str = (reference_ghost.get("metadata", {}).get("lap_time_str", "")
+                       or "--:--.---")
+        has_valid_reference = self._parse_time_ms(ref_lap_str) > 0
 
         # Delta card + projected/reference lap
         delta_val = state.delta_time if has_valid_reference else 0.0
@@ -1417,12 +1692,18 @@ class DashboardMainWindow(QMainWindow):
             self._session_max_speed = 0.0
             # Atualiza título da janela com pista e carro
             self.setWindowTitle(f"ApexView — {state.track_name} | {state.car_name}")
-            if self.session_manager.auto_load_ghosts(state):
+            loaded = self.session_manager.auto_load_ghosts(state)
+            # O catálogo desta pista/carro acabou de ser lido: agora as voltas
+            # gravadas em outros dias podem entrar no seletor de referência —
+            # e a referência salva no config.json pode ser reaplicada.
+            self.refresh_reference_choices()
+            if loaded:
                 self.on_ghost_mode_changed()
             self._update_best_map_base_trace()
             self.update_lap_selector_items()
             # Pista nova: recarrega/redetecta o mapeamento de curvas
             self._refresh_corner_map()
+            self._seed_coach_from_history()
             self._update_corner_analysis()
 
         # --- Track position progress bar ---
@@ -1437,7 +1718,8 @@ class DashboardMainWindow(QMainWindow):
         # acumula milhares de pontos e o setData tem custo proporcional.
         # Os gráficos são atualizados a ~12 Hz, que já é imperceptível ao olho.
         curr = self.session_manager.current_lap_data
-        self._graph_frame_skip = (getattr(self, "_graph_frame_skip", 0) + 1) % GRAPH_REDRAW_EVERY_N_FRAMES
+        self._graph_frame_skip = ((getattr(self, "_graph_frame_skip", 0) + 1)
+                                  % self.graph_every_n_frames)
         if len(curr["times"]) > 0 and self._graph_frame_skip == 0:
             if self.is_live:
                 current_time_sec = curr["times"][-1]
@@ -1475,9 +1757,7 @@ class DashboardMainWindow(QMainWindow):
                 # Recalcula o delta ao vivo usando interpolação por distância
                 # (igual ao render_selected_lap) para garantir que o gráfico
                 # funciona independentemente do momento em que o ghost foi carregado.
-                ref_idx = self.ghost_selector.combo.currentIndex()
-                ref_ghost = self._reference_ghost_for_index(ref_idx)
-                live_delta = self._calc_lap_delta(curr, ref_ghost)
+                live_delta = self._calc_lap_delta(curr, self.reference_ghost())
 
                 self.curve_delta.setData(curr["times"], live_delta)
                 self.curve_speed.setData(curr["times"], curr["speed"])
@@ -1528,9 +1808,58 @@ class DashboardMainWindow(QMainWindow):
                           "o dashboard continua normalmente:")
                     traceback.print_exc()
 
+        # --- Sessão nova dentro do mesmo fim de semana ---------------------
+        # Treino 1 -> Treino 2 -> classificação -> corrida, sem fechar o jogo.
+        # O SessionManager já separou as voltas no catálogo; aqui a TELA
+        # precisa acompanhar, senão o histórico continua mostrando a sessão
+        # anterior e a tabela de voltas nunca mais bate com a realidade.
+        if self.session_manager.session_index != self._session_index_seen:
+            self._session_index_seen = self.session_manager.session_index
+            self._on_new_session(state)
+
         # --- Update Lap History dynamically by Lap ID ---
         self._update_live_lap_history(state)
         
+    def _on_new_session(self, state: TelemetryState):
+        """
+        Zera o que é DA SESSÃO e preserva o que é do fim de semana.
+
+        Some: histórico de voltas da tela, seletor de voltas, conselhos do
+        engenheiro, curvas aprendidas pelo coach, ritmo e consumo.
+        Fica: catálogo em disco, Personal Best, volta ideal e o mapa de curvas
+        da pista — nada disso muda porque começou a classificação.
+        """
+        tipo = getattr(state, "session_type", "") or ""
+        print(f"[Dashboard] Sessão nova{f' ({tipo})' if tipo else ''}: "
+              "histórico da tela zerado.")
+
+        self.lap_history_table.setRowCount(0)
+        self.lap_history_table._best_row = -1
+        self._lap_row_map = {}
+        self._last_historic_count = -1
+        self._last_scrolled_lap = -1
+        self._session_max_speed = 0.0
+        self._last_exported_best = ""
+
+        self.engineer.reset()
+        # O coach recomeça a observar o piloto de hoje, mas NÃO esquece as
+        # melhores passagens: elas são do conjunto pista/carro e valem para o
+        # fim de semana inteiro. É a diferença entre chegar no Treino 2
+        # sabendo onde você perde e gastar duas voltas redescobrindo.
+        self.coach.reset()
+        self._coach_seed_signature = None
+        self._seed_coach_from_history()
+        self._corner_comparisons = []
+        self.corner_analysis_table.setRowCount(0)
+
+        self.engineer_panel.clear_messages()
+        self.engineer_panel.add_separator(
+            f"— {tipo or 'Nova sessão'} —")
+
+        self.set_live_mode()
+        self.update_lap_selector_items()
+        self.refresh_reference_choices()
+
     def _update_live_lap_history(self, state: TelemetryState):
         from PyQt5.QtWidgets import QTableWidgetItem
         from PyQt5.QtCore import Qt
@@ -1572,17 +1901,25 @@ class DashboardMainWindow(QMainWindow):
             return row_idx, True
 
         # --- 1. Re-sync completed laps ONLY when historic_laps changes ---
+        # A comparação é por DESIGUALDADE, não por "cresceu": numa sessão nova
+        # a lista é zerada, e a tabela da tela precisa acompanhar a queda.
         historic_count = len(self.session_manager.historic_laps)
         if getattr(self, '_last_historic_count', -1) != historic_count:
             self._last_historic_count = historic_count
             self.update_lap_selector_items()
+            # A volta que acabou de fechar já pode ser escolhida como referência
+            self.refresh_reference_choices()
             self._update_best_map_base_trace()
             # Volta fechada: é o momento de reavaliar as curvas
             self._update_corner_analysis()
             # ...e de o engenheiro dar o balanço dela (a tabela de curvas já
             # está recalculada, é dela que sai o "onde" e o "por quê")
             try:
-                self._engineer_on_lap_completed(state)
+                # Só quando uma volta REALMENTE fechou. `historic_laps` também
+                # muda ao ser zerada numa sessão nova, e aí não há balanço a dar.
+                if self.session_manager.laps_recorded != self._laps_recorded_seen:
+                    self._laps_recorded_seen = self.session_manager.laps_recorded
+                    self._engineer_on_lap_completed(state)
             except Exception:
                 if not getattr(self, "_engineer_failed", False):
                     self._engineer_failed = True
@@ -1603,6 +1940,19 @@ class DashboardMainWindow(QMainWindow):
                 set_cell(row_idx, 3, lap_data.get("s3", "--:--.---"))
                 total_str = lap_data.get("total_time", "--:--.---")
                 set_cell(row_idx, 4, total_str)
+
+                # Volta suja (corte de pista ou penalidade): fica marcada e
+                # NÃO concorre a melhor volta. Ela continua na tabela de
+                # propósito — o tempo aconteceu, você só não pode usá-lo.
+                if not lap_data.get("valid", True):
+                    num_item = self.lap_history_table.item(row_idx, 0)
+                    if num_item is not None and "⚠" not in num_item.text():
+                        num_item.setText(f"{lap_num} ⚠")
+                        num_item.setForeground(QColor("#c98a00"))
+                        num_item.setToolTip(
+                            "Volta suja: cortou a pista ou tomou penalidade")
+                    continue
+
                 lap_ms = self._parse_time_ms(total_str)
                 if lap_ms > 0:
                     if best_time_ms == 0 or lap_ms < best_time_ms:
@@ -1671,46 +2021,46 @@ class DashboardMainWindow(QMainWindow):
         if len(blg_t.get("car_x", [])) >= 2 and blg_ms > 30000:
             candidates.append((blg_ms, blg_t["car_x"], blg_t["car_z"]))
 
-        # 3. Voltas concluídas na sessão atual
-        for lap in self.session_manager.completed_laps:
-            t_str = lap.get("lap_time_str", "--:--.---")
-            ms = self._parse_time_ms(t_str)
-            telem = lap.get("telemetry", {})
-            cx, cz = telem.get("car_x", []), telem.get("car_z", [])
-            if len(cx) >= 2 and ms > 30000:
-                candidates.append((ms, cx, cz))
-
         if candidates:
             candidates.sort(key=lambda item: item[0])
             best_cx, best_cz = candidates[0][1], candidates[0][2]
             self.sidebar_panel.track_map_card.map_widget.set_base_trace(best_cx, best_cz)
-        elif self.session_manager.completed_laps:
-            last_telem = self.session_manager.completed_laps[-1].get("telemetry", {})
-            cx, cz = last_telem.get("car_x", []), last_telem.get("car_z", [])
-            if len(cx) >= 2:
-                self.sidebar_panel.track_map_card.map_widget.set_base_trace(cx, cz)
+            return
+
+        # 3. Nenhum dos dois ghosts serve: a volta mais rápida do catálogo que
+        #    tenha traçado. O índice responde qual é sem abrir arquivo nenhum;
+        #    só a vencedora sai do disco. Antes esta busca abria a telemetria
+        #    de todas as voltas da sessão a cada troca de pista.
+        sm = self.session_manager
+        with_trace = [r for r in sm.saved_laps()
+                      if "car_x" in r.channels and r.lap_time_ms > 30000]
+        if not with_trace:
+            return
+        best = min(with_trace, key=lambda r: r.lap_time_ms)
+        telem = sm.telemetry_for(best)
+        cx, cz = telem.get("car_x", []), telem.get("car_z", [])
+        if len(cx) >= 2:
+            self.sidebar_panel.track_map_card.map_widget.set_base_trace(cx, cz)
+
+    def _clear_ghost_curves(self):
+        self.curve_ghost_speed.setData([], [])
+        self.curve_ghost_gas.setData([], [])
+        self.curve_ghost_brake.setData([], [])
+        self.curve_ghost_steer.setData([], [])
+        self.sidebar_panel.track_map_card.map_widget.set_data([], [], [], [])
 
     def on_ghost_mode_changed(self):
-        idx = self.ghost_selector.combo.currentIndex()
-        ghost = None
-        
-        if idx == 0:
-            self.curve_ghost_speed.setData([], [])
-            self.curve_ghost_gas.setData([], [])
-            self.curve_ghost_brake.setData([], [])
-            self.curve_ghost_steer.setData([], [])
-            self.sidebar_panel.track_map_card.map_widget.set_data([], [], [], [])
-            # Mesmo com o ghost oculto nos gráficos, a referência numérica
-            # continua valendo (ver _reference_ghost_for_index)
-            self._update_corner_analysis()
-            return
-        elif idx == 1:
-            ghost = self.session_manager.best_lap_ghost.get("telemetry", {})
-        elif idx == 2:
-            ghost = self.session_manager.session_best_lap_ghost.get("telemetry", {})
-        elif idx == 3:
-            ghost = self.session_manager.ideal_lap_ghost.get("telemetry", {})
-            
+        """Redesenha tudo o que depende da referência e guarda a escolha."""
+        self._ref_cache_key = None
+        kind, lap_id = self.ghost_selector.selection()
+        self.config.set_reference(kind, lap_id)
+        # Escolha explícita do piloto vence a preferência que ainda esperava
+        # ser reaplicada — senão o próximo refresh a desfaria.
+        self._pending_reference = None
+
+        ghost = (self.reference_ghost().get("telemetry", {})
+                 if self.reference_shows_ghost() else {})
+
         if ghost and len(ghost.get("times", [])) > 0:
             x_data = ghost.get("times", [])
             n = len(x_data)
@@ -1740,11 +2090,7 @@ class DashboardMainWindow(QMainWindow):
                 ghost.get("gas", []), ghost.get("brake", [])
             )
         else:
-            self.curve_ghost_speed.setData([], [])
-            self.curve_ghost_gas.setData([], [])
-            self.curve_ghost_brake.setData([], [])
-            self.curve_ghost_steer.setData([], [])
-            self.sidebar_panel.track_map_card.map_widget.set_data([], [], [], [])
+            self._clear_ghost_curves()
 
         if hasattr(self, 'lap_selector') and self.lap_selector.combo.currentIndex() > 0:
             self.on_selected_lap_changed(self.lap_selector.combo.currentIndex())

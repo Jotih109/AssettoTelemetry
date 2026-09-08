@@ -22,7 +22,10 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.models import TelemetryState
-from core.session_manager import SessionManager, _read_json_safe, _write_json_atomic
+from core.session_manager import (
+    SessionManager, _read_json_safe, _write_json_atomic, _read_ideal_ghost,
+    IDEAL_GHOST_FILENAME, IDEAL_GHOST_LEGACY_FILENAME,
+)
 
 results = []
 
@@ -134,19 +137,31 @@ try:
           f"times={n_times}")
 
     final = _state(last_time="1:29.500", current_time="1:29.500", best_time="1:29.500")
-    sm3.save_lap(final)
-    saved = [f for f in os.listdir(folder) if f.endswith(".json") and "ghost" not in f]
-    check("save_lap grava o arquivo da volta", len(saved) >= 1, str(saved[:2]))
-    reread = _read_json_safe(os.path.join(folder, saved[0]))
-    check("volta salva relê como JSON válido", reread is not None)
+    record = sm3.save_lap(final)
+    check("save_lap devolve o registro do catálogo", record is not None,
+          str(record))
+    saved = [f for f in os.listdir(os.path.join(folder, "laps"))] \
+        if os.path.isdir(os.path.join(folder, "laps")) else []
+    check("save_lap grava o arquivo da volta em laps/", len(saved) >= 1, str(saved[:2]))
+    check("a volta é gravada comprimida",
+          bool(saved) and all(f.endswith(".json.gz") for f in saved), str(saved[:2]))
+    reread = sm3.telemetry_for(sm3.completed_laps[-1]) if sm3.completed_laps else None
+    check("volta salva relê pelo catálogo", bool(reread))
     check("volta salva tem car_x/car_z",
-          reread is not None and len(reread["telemetry"]["car_x"]) == n_times)
+          bool(reread) and len(reread["car_x"]) == n_times,
+          f"{len(reread['car_x']) if reread else 0} != {n_times}")
+    check("o índice do catálogo foi escrito",
+          os.path.exists(os.path.join(folder, "index.json")))
+    check("completed_laps não carrega telemetria embutida",
+          bool(sm3.completed_laps) and "telemetry" not in sm3.completed_laps[-1])
 
     # --- 6. Setor fechado alimenta a volta ideal ----------------------------
-    ideal = _read_json_safe(os.path.join(folder, "ideal_lap_ghost.json"))
+    ideal = _read_ideal_ghost(folder)
     check("volta ideal foi criada ao fechar o setor 1",
           ideal is not None and ideal["metadata"]["sector_times_ms"][0] > 0,
           str(ideal["metadata"]["sector_times_ms"]) if ideal else "arquivo ausente")
+    check("a volta ideal também é gravada comprimida",
+          os.path.exists(os.path.join(folder, IDEAL_GHOST_FILENAME)))
 
     # --- 7. Sessão não identificada não deve gravar nada --------------------
     # Ao entrar na pista existem alguns quadros em que o bloco estático do AC
@@ -192,6 +207,26 @@ try:
                 car_x=norm * 1000, car_z=norm * 500,
             ))
 
+    def _lap_frames_off_track(sm, lap_number, last_time, tyres_out=4,
+                              in_pit=False, from_pct=0, to_pct=100,
+                              lap_ms=LAP_MS):
+        """Igual a _lap_frames, mas com rodas fora da pista no meio da volta."""
+        for i in range(from_pct, to_pct):
+            norm = i / 100.0
+            ms = int(norm * lap_ms)
+            sm.process_state(_state(
+                current_time=f"{ms // 60000}:{(ms % 60000) // 1000:02d}.{ms % 1000:03d}",
+                last_time=last_time, best_time=last_time,
+                lap_number=lap_number, distance_traveled=norm * TRACK_M,
+                track_position=norm, speed_kmh=150.0 + norm * 100,
+                sector_index=0 if norm < 0.33 else (1 if norm < 0.66 else 2),
+                gas=0.8, brake=0.0, fuel=60.0, g_lat=1.2,
+                car_x=norm * 1000, car_z=norm * 500,
+                # Corta a pista só no meio da volta
+                tyres_out=tyres_out if 40 <= i <= 45 else 0,
+                in_pit=in_pit, in_pit_lane=in_pit,
+            ))
+
     def _cross_line(sm, new_lap_number, prev_time, new_time, delay_frames=3):
         """Cruza a linha: o tempo oficial só chega depois de `delay_frames`."""
         for i in range(8):
@@ -223,10 +258,11 @@ try:
               lap["lap_time_str"] == "1:29.745", lap["lap_time_str"])
         check("a volta fechada recebe o número dela, não o da volta nova",
               lap["lap_number"] == 1, str(lap["lap_number"]))
+        lap_tele = sm5.telemetry_for(lap)
         check("a volta fechada guarda a telemetria inteira",
-              len(lap["telemetry"]["times"]) == 100,
-              f"{len(lap['telemetry']['times'])} pontos")
-        d = lap["telemetry"]["distance"]
+              len(lap_tele.get("times", [])) == 100,
+              f"{len(lap_tele.get('times', []))} pontos")
+        d = lap_tele.get("distance", [])
         check("distância da volta salva é monotônica (nada da volta seguinte)",
               all(d[i] <= d[i + 1] for i in range(len(d) - 1)))
     check("a volta nova não perde os quadros do começo",
@@ -349,9 +385,124 @@ try:
     check("próxima volta completa vira o novo Personal Best",
           len(sm9.best_lap_ghost["telemetry"]["times"]) == 100,
           f"{len(sm9.best_lap_ghost['telemetry']['times'])} pontos")
-    saved_pb = _read_json_safe(os.path.join(heal_folder, "best_lap_ghost.json"))
-    check("o arquivo de Personal Best em disco foi reescrito",
-          saved_pb is not None and saved_pb["metadata"].get("full_lap") is True)
+    # O Personal Best deixou de ser um arquivo sobrescrito: agora é a volta
+    # mais rápida DO CATÁLOGO. Bater o recorde não apaga mais o anterior.
+    pb_rec = sm9.library.personal_best("Spa", "Test Car")
+    check("o Personal Best passa a ser derivado do catálogo",
+          pb_rec is not None and pb_rec.full_lap and pb_rec.lap_time_str == "1:29.900",
+          str(pb_rec.lap_time_str if pb_rec else None))
+    check("o best_lap_ghost.json antigo foi importado e saiu do caminho",
+          not os.path.exists(os.path.join(heal_folder, "best_lap_ghost.json"))
+          and os.path.exists(os.path.join(heal_folder, "best_lap_ghost.json.imported")))
+    # A volta parcial importada continua no catálogo (fixada), mas não pode
+    # ser Personal Best: `personal_best` exige volta inteira.
+    all_recs = sm9.library.records("Spa", "Test Car")
+    check("a volta parcial importada fica no catálogo sem virar referência",
+          any(r.pinned and not r.full_lap for r in all_recs),
+          str([(r.lap_time_str, r.full_lap, r.pinned) for r in all_recs]))
+
+    # --- 10a. A volta ideal não pode ser o arquivo mais gordo da pasta ------
+    # Ela é sintética e fica fora do catálogo (ninguém a deu), então escapava
+    # do arredondamento. Com a telemetria crua, o ideal_lap_ghost.json ficava
+    # DEZ VEZES maior que a volta comprimida que o originou.
+    sm_ideal = SessionManager(data_dir=os.path.join(work, "ideal"))
+    _lap_frames(sm_ideal, 1, "")
+    _cross_line(sm_ideal, 2, "", "1:30.000")
+    ideal_folder = os.path.join(work, "ideal", "Spa", "Test Car")
+    ideal_file = os.path.join(ideal_folder, IDEAL_GHOST_FILENAME)
+    laps_dir = os.path.join(ideal_folder, "laps")
+    check("a volta ideal foi gravada", os.path.exists(ideal_file))
+    if os.path.exists(ideal_file) and os.path.isdir(laps_dir):
+        ideal_size = os.path.getsize(ideal_file)
+        lap_size = sum(os.path.getsize(os.path.join(laps_dir, f))
+                       for f in os.listdir(laps_dir))
+        # Ela tem o tamanho de uma volta inteira, e agora é gravada como uma
+        check("a volta ideal não é maior que a volta real",
+              ideal_size <= lap_size * 2,
+              f"ideal={ideal_size}B  volta={lap_size}B")
+        ideal_json = _read_ideal_ghost(ideal_folder)
+        speeds = ideal_json["telemetry"]["speed"] if ideal_json else []
+        check("os canais da volta ideal saem arredondados",
+              bool(speeds) and all(round(v, 2) == v for v in speeds),
+              str(speeds[:3]))
+
+    # A volta ideal do formato antigo é lida e migrada na primeira gravação
+    migra_dir = os.path.join(work, "migra")
+    migra_folder = os.path.join(migra_dir, "Spa", "Test Car")
+    os.makedirs(migra_folder, exist_ok=True)
+    _write_json_atomic(os.path.join(migra_folder, IDEAL_GHOST_LEGACY_FILENAME), {
+        "metadata": {"track": "Spa", "car": "Test Car",
+                     "sector_times_ms": [40000, 40000, 40000], "lap_time_str": ""},
+        "telemetry": {"times": [0.0, 1.0], "distance": [0.0, 10.0],
+                      "speed": [100.0, 110.0], "gas": [1.0, 1.0],
+                      "brake": [0.0, 0.0], "sector": [0, 0], "rpm": [6000, 6100]},
+    })
+    sm_migra = SessionManager(data_dir=migra_dir)
+    sm_migra.auto_load_ghosts(_state())
+    check("volta ideal do formato antigo é lida",
+          sm_migra.ideal_lap_ghost["metadata"]["sector_times_ms"] == [40000, 40000, 40000],
+          str(sm_migra.ideal_lap_ghost["metadata"]["sector_times_ms"]))
+    check("o tempo total da volta ideal antiga é recalculado na leitura",
+          sm_migra.ideal_lap_ghost["metadata"]["lap_time_str"] == "2:00.000",
+          sm_migra.ideal_lap_ghost["metadata"]["lap_time_str"])
+    # Bater um setor grava no formato novo e tira o antigo do caminho
+    _lap_frames(sm_migra, 1, "")
+    _cross_line(sm_migra, 2, "", "1:30.000")
+    check("gravar a volta ideal migra para o formato comprimido",
+          os.path.exists(os.path.join(migra_folder, IDEAL_GHOST_FILENAME))
+          and not os.path.exists(os.path.join(migra_folder, IDEAL_GHOST_LEGACY_FILENAME)))
+
+    # --- 10b. Volta suja: gravada e listada, mas nunca vira referência ------
+    # O AC entrega `numberOfTyresOut`; três rodas fora é corte de pista. Antes
+    # nada disso era gravado, e uma volta cortando a grama virava Personal Best
+    # — a referência que o piloto passava a perseguir era um tempo que ele não
+    # conseguiria repetir limpo.
+    sm10 = SessionManager(data_dir=os.path.join(work, "sujas"))
+    _lap_frames_off_track(sm10, 1, "")
+    _cross_line(sm10, 2, "", "1:25.000")
+
+    check("volta suja é gravada e entra no histórico",
+          len(sm10.completed_laps) == 1 and len(sm10.historic_laps) == 1,
+          f"completed={len(sm10.completed_laps)} historic={len(sm10.historic_laps)}")
+    if sm10.completed_laps:
+        check("volta suja é marcada como inválida",
+              sm10.completed_laps[0]["valid"] is False)
+        check("o histórico também sabe que a volta é suja",
+              sm10.historic_laps[0].get("valid") is False)
+        check("a marca de suja vai para o catálogo",
+              sm10.completed_laps[0]["record"].valid is False)
+    check("volta suja NÃO vira referência de sessão, mesmo sendo a mais rápida",
+          sm10.session_best_lap_ghost["telemetry"]["times"] == [],
+          f"{len(sm10.session_best_lap_ghost['telemetry']['times'])} pontos")
+    check("volta suja NÃO vira Personal Best",
+          sm10.library.personal_best("Spa", "Test Car") is None)
+
+    # A volta limpa seguinte assume, mesmo sendo MAIS LENTA que a suja
+    _lap_frames(sm10, 2, "1:25.000")
+    _cross_line(sm10, 3, "1:25.000", "1:31.000")
+    check("a volta limpa seguinte vira referência, mesmo mais lenta",
+          len(sm10.session_best_lap_ghost["telemetry"]["times"]) == 100,
+          sm10.session_best_lap_ghost["metadata"].get("lap_time_str"))
+    pb10 = sm10.library.personal_best("Spa", "Test Car")
+    check("o Personal Best é a volta limpa, não a suja mais rápida",
+          pb10 is not None and pb10.lap_time_str == "1:31.000",
+          str(pb10.lap_time_str if pb10 else None))
+
+    # No box e no pit lane as quatro rodas ficam "fora" o tempo todo: isso não
+    # pode invalidar a volta de saída de box por um motivo errado.
+    sm11 = SessionManager(data_dir=os.path.join(work, "boxes"))
+    _lap_frames_off_track(sm11, 1, "", tyres_out=4, in_pit=True)
+    _cross_line(sm11, 2, "", "1:33.000")
+    check("rodas fora dentro do box não invalidam a volta",
+          bool(sm11.completed_laps) and sm11.completed_laps[0]["valid"] is True,
+          str(sm11.completed_laps[0]["valid"] if sm11.completed_laps else None))
+
+    # Duas rodas na zebra continuam sendo volta limpa
+    sm12 = SessionManager(data_dir=os.path.join(work, "zebra"))
+    _lap_frames_off_track(sm12, 1, "", tyres_out=2)
+    _cross_line(sm12, 2, "", "1:29.000")
+    check("duas rodas na zebra não invalidam a volta",
+          bool(sm12.completed_laps) and sm12.completed_laps[0]["valid"] is True)
 
     # --- 11. Volta feita ANTES do app abrir não é volta concluída -----------
     # O jogo já entrega um iLastTime da volta anterior no primeiro quadro; ler

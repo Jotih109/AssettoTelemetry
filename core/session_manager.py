@@ -2,7 +2,12 @@ import json
 import os
 import copy
 from datetime import datetime
+
 from core.models import TelemetryState
+from core.lap_library import (
+    LapLibrary, LapRecord, RetentionPolicy, clean_name, compact_telemetry,
+    read_json_file, write_json_gzip_atomic,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -20,7 +25,7 @@ def _write_json_atomic(path: str, data: dict) -> bool:
     tmp_path = f"{path}.tmp"
     try:
         with open(tmp_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f)
+            json.dump(data, f, separators=(',', ':'))
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
@@ -93,6 +98,67 @@ LAP_TIME_WAIT_FRAMES = 45
 MIN_LAP_POINTS = 20
 MIN_LAP_SPAN_S = 5.0
 
+#: A partir de quantas rodas fora da pista a volta deixa de ser "limpa".
+#: É a mesma régua que o Assetto Corsa usa para invalidar hotlap: com duas
+#: rodas na zebra você ainda está na pista, com três você cortou.
+#: Volta inválida continua sendo gravada e aparece no histórico — ela só não
+#: pode virar Personal Best nem referência.
+INVALIDATING_TYRES_OUT = 3
+
+
+def ms_to_str(ms: int) -> str:
+    """Milissegundos -> texto de tempo. Zero ou negativo vira '--:--'."""
+    if ms <= 0:
+        return "--:--"
+    m = int(ms // 60000)
+    s = int((ms % 60000) // 1000)
+    mls = int(ms % 1000)
+    return f"{m}:{s:02d}.{mls:03d}" if m > 0 else f"{s}.{mls:03d}"
+
+
+#: A volta ideal é sintética (os melhores setores costurados), então não entra
+#: no catálogo de voltas — ninguém a deu. Mas ela tem o tamanho de uma volta
+#: inteira, e por isso vai comprimida como as outras. O `.json` sem compressão
+#: é o formato das versões anteriores, lido enquanto existir.
+IDEAL_GHOST_FILENAME = "ideal_lap_ghost.json.gz"
+IDEAL_GHOST_LEGACY_FILENAME = "ideal_lap_ghost.json"
+
+
+def _ideal_ghost_paths(folder_path: str):
+    """`(caminho_atual, caminho_legado)` da volta ideal."""
+    return (os.path.join(folder_path, IDEAL_GHOST_FILENAME),
+            os.path.join(folder_path, IDEAL_GHOST_LEGACY_FILENAME))
+
+
+def _read_ideal_ghost(folder_path: str):
+    """Lê a volta ideal, comprimida ou no formato antigo. None se não houver."""
+    path, legacy = _ideal_ghost_paths(folder_path)
+    if os.path.exists(path):
+        return read_json_file(path)
+    if os.path.exists(legacy):
+        return _read_json_safe(legacy)
+    return None
+
+
+def _write_ideal_ghost(folder_path: str, data: dict) -> bool:
+    """
+    Grava a volta ideal comprimida e tira do caminho a versão antiga.
+
+    A migração é feita aqui, na gravação, e não na leitura: a volta ideal é
+    dado DERIVADO — ela se refaz sozinha conforme você anda — então não vale
+    reescrever arquivo de ninguém só para trocar o formato.
+    """
+    path, legacy = _ideal_ghost_paths(folder_path)
+    if not write_json_gzip_atomic(path, data):
+        return False
+    if os.path.exists(legacy):
+        try:
+            os.remove(legacy)
+        except OSError as e:
+            print(f"[SessionManager] Volta ideal migrada, mas o arquivo antigo "
+                  f"continua lá: {e}")
+    return True
+
 
 def _is_plausible_lap(lap_data: dict) -> bool:
     """Volta com telemetria suficiente para entrar no histórico."""
@@ -127,16 +193,48 @@ class SessionManager:
     Gerencia a sessão atual, mantendo as arrays da volta atual e da volta ideal (Theoretical Best).
     Faz o fatiamento e costura (splicing) de setores em tempo real.
     """
-    def __init__(self, data_dir=None):
+    def __init__(self, data_dir=None, library: LapLibrary = None,
+                 retention: RetentionPolicy = None):
         self.data_dir = data_dir if data_dir else get_app_dir("telemetry_data")
-            
+
+        #: Catálogo de voltas em disco. É por aqui que tudo é gravado e lido —
+        #: o índice é leve, e a telemetria de cada volta só sai do disco quando
+        #: alguém pede aquela volta (ver core/lap_library.py).
+        self.library = library or LapLibrary(data_dir=self.data_dir,
+                                            retention=retention)
+
+        #: Identificador desta sessão, usado para agrupar as voltas no catálogo
+        self.session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+        #: Sobe a cada sessão nova. A interface compara este número para saber
+        #: que precisa limpar o histórico da tela, o engenheiro e o coach.
+        self.session_index = 0
+        #: Voltas gravadas desde que o app abriu. NUNCA volta para trás, nem na
+        #: troca de sessão — é o contador que quem quiser reagir a "fechou uma
+        #: volta" deve observar. `len(completed_laps)` é zerado a cada sessão
+        #: nova, e quem comparava com ele parava de receber voltas do Treino 2
+        #: em diante, em silêncio.
+        self.laps_recorded = 0
+        #: Tipo da sessão em curso, como o jogo informa ("Practice", "Race"...)
+        self.session_type = ""
+        #: (pista, carro) já limpos, definidos ao identificar a sessão
+        self._track_car = ("", "")
+
         self.historic_laps = []
+        #: Voltas concluídas NESTA sessão. Cada item traz metadados e o
+        #: `LapRecord` do catálogo — não a telemetria. Guardar os 5.000 pontos
+        #: de cada volta aqui custava dezenas de MB por sessão; quem precisa
+        #: dos pontos chama `telemetry_for()`, que lê do catálogo com cache.
         self.completed_laps = []
         self.reset_current_lap()
-        
+
         self.best_lap_ghost = self._empty_ghost()
         self.session_best_lap_ghost = self._empty_ghost()
         self.ideal_lap_ghost = self._empty_ghost()
+        #: Sobe toda vez que um dos três ghosts é trocado. A interface usa este
+        #: número para saber se pode reaproveitar a referência que resolveu no
+        #: quadro anterior — comparar por `id()` dos dicionários não serve,
+        #: porque o CPython reaproveita o id de um objeto já coletado.
+        self.ghosts_revision = 0
         
         self._last_time = ""
         self._best_time = ""
@@ -151,6 +249,12 @@ class SessionManager:
         self._fuel_at_lap_start = -1.0
         self._fuel_consumption_history: list = []  # L per lap
         self.avg_fuel_per_lap: float = 0.0
+        # Validade da volta em andamento: pior número de rodas fora e se
+        # apareceu penalidade. Zerados a cada cruzamento de linha.
+        self._lap_tyres_out_max = 0
+        self._lap_had_penalty = False
+        #: A volta em andamento passou pelo pit lane (saída ou retorno)
+        self._lap_touched_pits = False
         # Snapshot of the LAST COMPLETED lap — never wiped by reset
         self.last_completed_sector_times = [0, 0, 0]
         self.last_completed_lap_time_str = ""
@@ -178,11 +282,8 @@ class SessionManager:
                       "unknown track", "unknown car"}
 
     def _clean_folder_names(self, track, car):
-        invalid_chars = '<>:"/\\|?*'
-        for c in invalid_chars:
-            track = track.replace(c, '')
-            car = car.replace(c, '')
-        return track if track else "UnknownTrack", car if car else "UnknownCar"
+        """Nomes de pista/carro utilizáveis como pasta (ver lap_library)."""
+        return clean_name(track, "UnknownTrack"), clean_name(car, "UnknownCar")
 
     def _is_identified(self, track: str, car: str) -> bool:
         """
@@ -208,6 +309,8 @@ class SessionManager:
         if reference_ghost is None:
             reference_ghost = self.session_best_lap_ghost
 
+        self._detect_new_session(state)
+
         # Exposto para a UI calcular os deltas de setor sem duplicar a lógica de seleção
         self.current_reference_sector_ms = reference_ghost.get("metadata", {}).get("sector_times_ms", [0, 0, 0])
 
@@ -226,7 +329,20 @@ class SessionManager:
 
         time_sec = parse_time_to_ms(state.current_time) / 1000.0
         time_ms = int(time_sec * 1000)
-        
+
+        # --- Validade da volta em andamento ---
+        # No box e no pit lane o jogo reporta as quatro rodas fora, o que
+        # invalidaria toda volta de saída de box por um motivo errado. Fora
+        # dali, três rodas fora é corte de pista.
+        if state.in_pit or state.in_pit_lane:
+            self._lap_touched_pits = True
+        else:
+            self._lap_tyres_out_max = max(
+                self._lap_tyres_out_max, int(getattr(state, "tyres_out", 0) or 0))
+        if getattr(state, "penalty_time", 0.0) > 0.0:
+            self._lap_had_penalty = True
+
+
         # --- Live Delta Calculation ---
         best_ghost_t = reference_ghost.get("telemetry", {})
         best_times = best_ghost_t.get("times", [])
@@ -360,6 +476,92 @@ class SessionManager:
         # pista ainda não tem mapeamento manual (|G lat| > 0.4g).
         self.current_lap_data["g_lat"].append(state.g_lat)
 
+    def _detect_new_session(self, state: TelemetryState) -> bool:
+        """
+        Começou uma sessão nova sem o app ter sido reiniciado?
+
+        Um fim de semana de corrida é Treino 1, Treino 2, Treino 3,
+        classificação e corrida — cinco sessões na MESMA pista, com o MESMO
+        carro, muitas vezes sem fechar o jogo. Sem detectar isso, as voltas das
+        cinco caíam todas no mesmo balaio: o histórico da tela crescia sem
+        parar, "melhor volta da sessão" era a melhor do fim de semana inteiro,
+        e no catálogo não havia como dizer "as voltas da classificação".
+
+        Três sinais, porque nenhum sozinho cobre tudo:
+
+        * o TIPO mudou (treino -> classificação -> corrida);
+        * o contador de voltas do jogo voltou para trás (é o que acontece de
+          Treino 1 para Treino 2, em que o tipo continua "Practice");
+        * o número de voltas completadas caiu.
+
+        Trocar de pista ou de carro também começa sessão nova, mas isso é
+        tratado em `auto_load_ghosts`, que é chamado pela interface nesse caso.
+        """
+        tipo = (getattr(state, "session_type", "") or "").strip()
+        lap = int(getattr(state, "lap_number", 0) or 0)
+        done = int(getattr(state, "completed_laps", 0) or 0)
+
+        if not self._seen_first_frame:
+            self.session_type = tipo
+            self._session_last_lap = lap
+            self._session_last_done = done
+            return False
+
+        anterior_lap = getattr(self, "_session_last_lap", lap)
+        anterior_done = getattr(self, "_session_last_done", done)
+        self._session_last_lap = lap
+        self._session_last_done = done
+
+        mudou_tipo = bool(tipo) and bool(self.session_type) and tipo != self.session_type
+        # Voltar mais de uma volta para trás não acontece andando; só numa
+        # sessão nova ou num restart.
+        voltou_contador = anterior_lap - lap >= 1 and lap <= 1
+        caiu_completadas = done < anterior_done
+
+        if not (mudou_tipo or voltou_contador or caiu_completadas):
+            self.session_type = tipo or self.session_type
+            return False
+
+        self.start_new_session(tipo)
+        return True
+
+    def start_new_session(self, session_type: str = "") -> None:
+        """
+        Começa uma sessão: id novo, histórico limpo, melhor da sessão zerada.
+
+        O Personal Best e a volta ideal NÃO são zerados — eles são do conjunto
+        pista/carro e valem para o fim de semana inteiro. Quem zera é a melhor
+        volta *da sessão*, que é o que o piloto compara com o que está fazendo
+        agora.
+        """
+        self.session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.session_index += 1
+        if session_type:
+            self.session_type = session_type
+        self.historic_laps = []
+        self.completed_laps = []
+        self.session_best_lap_ghost = self._empty_ghost()
+        self.ghosts_revision += 1
+
+        # Estado de fechamento de volta: uma volta pela metade não atravessa
+        # a fronteira entre duas sessões.
+        self._pending_lap = None
+        self.reset_current_lap()
+        self._current_sector_0_ms = 0
+        self._current_sector_1_ms = 0
+        self._last_sector_index = 0
+        self._lap_tyres_out_max = 0
+        self._lap_had_penalty = False
+        self._lap_touched_pits = False
+        self._fuel_at_lap_start = -1.0
+        self._fuel_consumption_history = []
+        self.avg_fuel_per_lap = 0.0
+        self.last_completed_sector_times = [0, 0, 0]
+        self.last_completed_lap_time_str = ""
+        print(f"[SessionManager] Sessão nova detectada"
+              f"{f' ({self.session_type})' if self.session_type else ''}: "
+              f"histórico da tela zerado, catálogo preservado.")
+
     def _begin_lap_close(self, state: TelemetryState):
         """
         Primeira etapa do fim de volta: separa a volta que fechou e começa a
@@ -384,6 +586,12 @@ class SessionManager:
             # já está contando a volta nova
             "lap_number": self._last_lap_number or getattr(state, "lap_number", 0),
             "frames": 0,
+            # A validade tem que ser fotografada AQUI: a volta nova já começa
+            # a acumular rodas fora no quadro seguinte, e o tempo oficial (que
+            # é quem finaliza a volta antiga) só chega dezenas de ms depois.
+            "tyres_out_max": self._lap_tyres_out_max,
+            "had_penalty": self._lap_had_penalty,
+            "touched_pits": self._lap_touched_pits,
         }
 
         self.reset_current_lap()
@@ -391,6 +599,11 @@ class SessionManager:
         self._current_sector_0_ms = 0
         self._current_sector_1_ms = 0
         self._fuel_at_lap_start = state.fuel
+        self._lap_tyres_out_max = 0
+        self._lap_had_penalty = False
+        # A volta nova já começa "no box" se o carro ainda está no pit lane:
+        # é o caso da volta de saída, que não pode virar referência.
+        self._lap_touched_pits = bool(state.in_pit or state.in_pit_lane)
 
     def _finish_lap_close(self, state: TelemetryState, lap_time_str: str):
         """
@@ -415,8 +628,12 @@ class SessionManager:
 
         self._update_ideal_lap(state, 2, sector_times[2], lap_data=lap_data)
 
+        valid = (pending.get("tyres_out_max", 0) < INVALIDATING_TYRES_OUT
+                 and not pending.get("had_penalty", False))
+
         self.save_lap(state, lap_time_str=lap_time_str, lap_data=lap_data,
-                      sector_times=sector_times, lap_number=pending["lap_number"])
+                      sector_times=sector_times, lap_number=pending["lap_number"],
+                      valid=valid, pit_lap=pending.get("touched_pits", False))
 
         if lap_time_str not in ("", "--:--.---"):
             self._last_time = lap_time_str
@@ -430,13 +647,11 @@ class SessionManager:
         if not self._is_identified(track, car):
             return
         folder_path = os.path.join(self.data_dir, track, car)
-        ideal_path = os.path.join(folder_path, "ideal_lap_ghost.json")
-        
+
         ideal_data = self._empty_ghost()
-        if os.path.exists(ideal_path):
-            loaded = _read_json_safe(ideal_path)
-            if loaded is not None and "metadata" in loaded and "telemetry" in loaded:
-                ideal_data = loaded
+        loaded = _read_ideal_ghost(folder_path)
+        if loaded is not None and "metadata" in loaded and "telemetry" in loaded:
+            ideal_data = loaded
 
         ideal_sector_times = ideal_data["metadata"].get("sector_times_ms", [0, 0, 0])
         best_recorded_time = ideal_sector_times[closed_sector]
@@ -506,152 +721,250 @@ class SessionManager:
                 for key in new_telemetry.keys():
                     new_telemetry[key] = [new_telemetry[key][i] for i in sorted_indices]
                     
-            ideal_data["telemetry"] = new_telemetry
+            # Mesmo arredondamento das voltas do catálogo. A volta ideal é
+            # sintética e fica num arquivo próprio (não entra no catálogo,
+            # porque ninguém a deu), mas ela tem o tamanho de uma volta
+            # inteira: gravada crua, ocupava quase 2 MB — dez vezes mais que
+            # a volta de verdade que a originou.
+            ideal_data["telemetry"] = compact_telemetry(new_telemetry)
             self.ideal_lap_ghost = ideal_data
-            
+            self.ghosts_revision += 1
+
             os.makedirs(folder_path, exist_ok=True)
-            _write_json_atomic(ideal_path, ideal_data)
+            _write_ideal_ghost(folder_path, ideal_data)
  
     def save_lap(self, state: TelemetryState, manual=False, lap_time_str: str = None,
                  lap_data: dict = None, sector_times: list = None,
-                 lap_number: int = None):
+                 lap_number: int = None, valid: bool = True,
+                 pit_lap: bool = False):
         """
-        Grava uma volta e atualiza histórico e ghosts.
+        Grava uma volta no catálogo e atualiza histórico e ghosts.
+
+        Devolve o `LapRecord` gravado, ou None se a volta foi descartada.
 
         Os parâmetros opcionais existem para o fim de volta em duas etapas: a
         volta que fechou não é mais `current_lap_data` quando o tempo oficial
         chega, e o número dela é o do quadro anterior ao cruzamento.
+
+        `valid` é a volta limpa (sem corte de pista nem penalidade) e `pit_lap`
+        diz se ela passou pelo pit lane. Volta inválida ou de box é gravada e
+        listada normalmente — ela só não pode virar Personal Best, referência,
+        nem material de análise para o coach.
         """
         if lap_data is None:
             lap_data = self.current_lap_data
         if sector_times is None:
             sector_times = self.current_sector_times
-        if len(lap_data["times"]) == 0: return
+        if len(lap_data["times"]) == 0:
+            return None
         track, car = self._clean_folder_names(state.track_name.strip(), state.car_name.strip())
         if not self._is_identified(track, car):
             print("[SessionManager] Volta descartada: pista/carro ainda não identificados "
                   f"({track} / {car}).")
-            return
+            return None
 
-        plausible = _is_plausible_lap(lap_data)
-        if not plausible:
-            # Um punhado de quadros não é uma volta: não entra no histórico nem
-            # pode virar referência (era isso que estourava o delta). A gravação
-            # em disco continua, para não perder nada que possa ser útil.
-            print(f"[SessionManager] Volta curta demais para o histórico "
-                  f"({len(lap_data['times'])} pontos): fica só no arquivo.")
-
-        folder_path = os.path.join(self.data_dir, track, car)
-        os.makedirs(folder_path, exist_ok=True)
+        if not _is_plausible_lap(lap_data):
+            # Um punhado de quadros não é uma volta. Antes isso ia para o disco
+            # "para não perder nada" — e cada saída de box, teleporte e ESC
+            # deixava um arquivo que era relido em toda sessão seguinte. Uma
+            # volta manual é a exceção: se você clicou em salvar, você quis.
+            if not manual:
+                print(f"[SessionManager] Volta curta demais "
+                      f"({len(lap_data['times'])} pontos): descartada.")
+                return None
 
         if lap_time_str is None:
             lap_time_str = state.last_time if not manual else state.current_time
-        now = datetime.now()
-        safe_lap_time = lap_time_str.replace(":", "-")
-        filename = f"{now.strftime('%Y-%m-%d_%H-%M')}_{safe_lap_time}.json"
+        if lap_number is None:
+            lap_number = getattr(state, "lap_number", len(self.historic_laps) + 1)
 
         full_lap = covers_full_lap(lap_data, getattr(state, "track_length", 0.0))
 
-        data_to_save = {
-            "metadata": {
-                "track": track, "car": car,
-                "lap_time_str": lap_time_str,
-                "sector_times_ms": list(sector_times),
-                "timestamp": now.isoformat(),
-                "manual_save": manual,
-                # Marca se a telemetria cobre a volta inteira — quem lê o
-                # arquivo depois sabe se pode usá-la como referência
-                "full_lap": full_lap,
-            },
-            "telemetry": lap_data
-        }
-
-        _write_json_atomic(os.path.join(folder_path, filename), data_to_save)
-            
-        def ms_to_str(ms):
-            if ms <= 0: return "--:--"
-            m = int(ms / 60000)
-            s = int((ms % 60000) / 1000)
-            mls = int(ms % 1000)
-            if m > 0:
-                return f"{m}:{s:02d}.{mls:03d}"
-            return f"{s}.{mls:03d}"
-            
-        if not plausible:
-            return
-
-        if lap_number is None:
-            lap_number = getattr(state, "lap_number", len(self.historic_laps) + 1)
+        record = self.library.save_lap(
+            track, car,
+            telemetry=lap_data,
+            lap_time_str=lap_time_str,
+            sector_times_ms=list(sector_times),
+            lap_number=lap_number,
+            session_id=self.session_id,
+            full_lap=full_lap,
+            valid=valid,
+            pit_lap=pit_lap,
+            manual=manual,
+            extra_metadata={"track_length": getattr(state, "track_length", 0.0)},
+        )
+        if record is None:
+            return None
+        self.laps_recorded += 1
 
         self.historic_laps.append({
             "lap_number": lap_number,
             "s1": ms_to_str(sector_times[0]),
             "s2": ms_to_str(sector_times[1]),
             "s3": ms_to_str(sector_times[2]),
-            "total_time": lap_time_str
+            "total_time": lap_time_str,
+            "valid": valid,
+            "pit_lap": pit_lap,
         })
 
+        # A telemetria NÃO fica aqui: o catálogo a devolve sob demanda, com
+        # cache. Guardar os 5.000 pontos de cada volta da sessão custava
+        # dezenas de MB e era relido do disco a cada nova sessão.
         self.completed_laps.append({
             "lap_number": lap_number,
             "lap_time_str": lap_time_str,
-            "metadata": copy.deepcopy(data_to_save["metadata"]),
-            "telemetry": copy.deepcopy(data_to_save["telemetry"])
+            "valid": valid,
+            "pit_lap": pit_lap,
+            "record": record,
+            "metadata": {
+                "track": track, "car": car,
+                "lap_time_str": lap_time_str,
+                "sector_times_ms": list(sector_times),
+                "timestamp": record.timestamp,
+                "manual_save": manual,
+                "full_lap": full_lap,
+                "valid": valid,
+                "pit_lap": pit_lap,
+                "lap_id": record.lap_id,
+            },
         })
 
-        # Salva o Session Best na memória. Tempo ilegível conta como "infinito",
-        # para nunca ganhar a comparação.
+        # Session Best e Personal Best: tempo ilegível conta como "infinito",
+        # para nunca ganhar a comparação. Só volta com tempo de verdade
+        # (>30 s, evita lapsos e saída de box), telemetria INTEIRA (senão o
+        # delta não tem com o que comparar) e LIMPA pode virar referência.
         current_lap_ms = parse_lap_time_ms(lap_time_str) or 9999999
-        session_best_str = self.session_best_lap_ghost["metadata"].get("lap_time_str", "")
-        session_best_ms = (parse_lap_time_ms(session_best_str) or 9999999) if session_best_str else 9999999
+        is_reference_material = (current_lap_ms > 30000 and full_lap
+                                 and valid and not pit_lap)
 
-        # Validar Best Lap: mais de 30 segundos (evita lapsos/saídas de box) E
-        # telemetria da volta inteira (senão o delta não tem com o que comparar).
-        is_real_lap_time = current_lap_ms > 30000 and full_lap
-        if is_real_lap_time and current_lap_ms < session_best_ms:
-            # Novo session best
-            self.session_best_lap_ghost = copy.deepcopy(data_to_save)
+        if is_reference_material:
+            ghost = {"metadata": copy.deepcopy(self.completed_laps[-1]["metadata"]),
+                     "telemetry": copy.deepcopy(lap_data)}
 
-        # O ghost de Personal Best sobrescreve um arquivo em disco: só uma volta
-        # com tempo de volta de verdade e telemetria inteira pode fazer isso.
-        # `pb_missing` é a auto-cura: quando não há PB em disco — ou quando o
-        # que havia foi recusado na leitura por estar incompleto — a próxima
-        # volta boa assume o posto, sem precisar bater o recorde do jogo.
-        pb_missing = not self.best_lap_ghost.get("telemetry", {}).get("times")
-        if is_real_lap_time and (state.best_time != self._best_time or manual or pb_missing):
-            self._best_time = state.best_time
-            self.best_lap_ghost = copy.deepcopy(data_to_save)
-            _write_json_atomic(os.path.join(folder_path, "best_lap_ghost.json"), data_to_save)
- 
+            session_best_str = self.session_best_lap_ghost["metadata"].get("lap_time_str", "")
+            session_best_ms = ((parse_lap_time_ms(session_best_str) or 9999999)
+                               if session_best_str else 9999999)
+            if current_lap_ms < session_best_ms:
+                self.session_best_lap_ghost = ghost
+                self.ghosts_revision += 1
+
+            # O Personal Best deixou de ser um arquivo sobrescrito: ele é a
+            # volta mais rápida DO CATÁLOGO. Bater o recorde não apaga mais o
+            # anterior — ele continua na lista e pode voltar a ser referência.
+            pb_str = self.best_lap_ghost["metadata"].get("lap_time_str", "")
+            pb_ms = (parse_lap_time_ms(pb_str) or 9999999) if pb_str else 9999999
+            if current_lap_ms < pb_ms:
+                self._best_time = state.best_time
+                self.best_lap_ghost = copy.deepcopy(ghost)
+                self.ghosts_revision += 1
+
+        return record
+
+    # -----------------------------------------------------------------------
+    # Catálogo: acesso às voltas gravadas
+    # -----------------------------------------------------------------------
+
+    @property
+    def track_car(self):
+        """`(pista, carro)` já limpos da sessão atual, ou `("", "")`."""
+        return self._track_car
+
+    def telemetry_for(self, entry) -> dict:
+        """
+        Telemetria de uma volta do histórico ou do catálogo.
+
+        Aceita tanto um item de `completed_laps` quanto um `LapRecord` direto.
+        Devolve `{}` quando a volta não existe mais em disco — quem chama
+        desenha um gráfico vazio em vez de estourar.
+        """
+        record = entry.get("record") if isinstance(entry, dict) else entry
+        if not isinstance(record, LapRecord):
+            # Item antigo que ainda carrega a telemetria embutida
+            if isinstance(entry, dict) and isinstance(entry.get("telemetry"), dict):
+                return entry["telemetry"]
+            return {}
+        track, car = self._track_car if self._track_car[0] else (record.track, record.car)
+        return self.library.load_telemetry(track, car, record) or {}
+
+    def ghost_for_lap_id(self, lap_id: str) -> dict:
+        """
+        Ghost completo de uma volta do catálogo, pelo id.
+
+        É o que faz o seletor de referência conseguir apontar para QUALQUER
+        volta gravada — inclusive de outro dia — e não só para os três ghosts
+        fixos que o app mantinha em memória.
+        """
+        track, car = self._track_car
+        if not track:
+            return self._empty_ghost()
+        record = self.library.find(track, car, lap_id)
+        if record is None:
+            return self._empty_ghost()
+        return self.library.load_ghost(track, car, record) or self._empty_ghost()
+
+    def saved_laps(self, *, only_reference_material: bool = False):
+        """Índice de voltas gravadas para a pista/carro atuais."""
+        track, car = self._track_car
+        if not track:
+            return []
+        return self.library.records(track, car,
+                                    only_full=only_reference_material,
+                                    only_valid=only_reference_material)
+
+    # -----------------------------------------------------------------------
+    # Carga ao entrar na pista
+    # -----------------------------------------------------------------------
+
     def auto_load_ghosts(self, state: TelemetryState):
-        """ Carrega tanto o Best quanto o Ideal """
+        """
+        Prepara a sessão para uma pista/carro: catálogo, Personal Best e volta ideal.
+
+        O que mudou em relação às versões anteriores: aqui não se lê mais a
+        telemetria de todas as voltas já gravadas. Lê-se o índice (alguns KB) e
+        a telemetria de UMA volta — o Personal Best. Com 200 voltas em disco a
+        diferença é entre travar segundos ao entrar na pista e não travar.
+        """
         track, car = self._clean_folder_names(state.track_name.strip(), state.car_name.strip())
         if not self._is_identified(track, car):
             return False
-        folder_path = os.path.join(self.data_dir, track, car)
 
-        best_path = os.path.join(folder_path, "best_lap_ghost.json")
-        ideal_path = os.path.join(folder_path, "ideal_lap_ghost.json")
-        
+        if self._track_car != (track, car):
+            self._track_car = (track, car)
+            # Trocar de pista ou de carro é outra sessão: as voltas de uma não
+            # se misturam com as da outra no catálogo nem no histórico da tela.
+            # É o mesmo caminho da troca de sessão dentro do fim de semana.
+            self.start_new_session(getattr(state, "session_type", "") or "")
+
+        folder_path = os.path.join(self.data_dir, track, car)
+        self._import_legacy_best_lap(track, car, state)
+
         loaded = False
-        best_data = _read_json_safe(best_path) if os.path.exists(best_path) else None
+
+        # --- Personal Best: a volta mais rápida do catálogo ---
+        pb_record = self.library.personal_best(track, car)
+        pb_ghost = (self.library.load_ghost(track, car, pb_record)
+                    if pb_record is not None else None)
         # Um PB gravado por versão anterior pode conter uma volta pela metade
         # (o app tinha sido aberto no meio de uma volta). Como referência ela
         # não serve: recusar aqui é o que faz o app se curar sozinho na próxima
         # volta boa, em vez de mostrar delta sem sentido para sempre.
-        if (best_data is not None and "telemetry" in best_data
-                and best_data["telemetry"].get("distance")
-                and not covers_full_lap(best_data["telemetry"],
+        if (pb_ghost is not None and pb_ghost["telemetry"].get("distance")
+                and not covers_full_lap(pb_ghost["telemetry"],
                                         getattr(state, "track_length", 0.0))):
             print("[SessionManager] Personal Best em disco cobre só parte da volta: "
                   "descartado (a próxima volta completa toma o lugar).")
-            best_data = None
-        if best_data is not None and "telemetry" in best_data:
-            self.best_lap_ghost = best_data
+            pb_ghost = None
+        if pb_ghost is not None:
+            self.best_lap_ghost = pb_ghost
+            self._best_time = pb_ghost["metadata"].get("lap_time_str", "")
             loaded = True
         else:
             self.best_lap_ghost = self._empty_ghost()
 
-        ideal_data = _read_json_safe(ideal_path) if os.path.exists(ideal_path) else None
+        # --- Volta ideal: sintética (melhores setores costurados) ---
+        # Não é uma volta que alguém deu, então não entra no catálogo: continua
+        # no arquivo próprio dela.
+        ideal_data = _read_ideal_ghost(folder_path)
         if ideal_data is not None and "telemetry" in ideal_data:
             self.ideal_lap_ghost = ideal_data
             meta = self.ideal_lap_ghost.get("metadata", {})
@@ -667,24 +980,56 @@ class SessionManager:
         else:
             self.ideal_lap_ghost = self._empty_ghost()
 
-        if os.path.exists(folder_path):
-            saved_files = sorted([f for f in os.listdir(folder_path) if f.endswith(".json") and f not in ("best_lap_ghost.json", "ideal_lap_ghost.json")])
-            for fname in saved_files:
-                fpath = os.path.join(folder_path, fname)
-                ldata = _read_json_safe(fpath)
-                if ldata and "telemetry" in ldata and len(ldata["telemetry"].get("times", [])) > 0:
-                    meta = ldata.get("metadata", {})
-                    lap_t_str = meta.get("lap_time_str", "--:--.---")
-                    already_present = any(
-                        c.get("lap_time_str") == lap_t_str and c.get("telemetry", {}).get("times") == ldata["telemetry"].get("times")
-                        for c in self.completed_laps
-                    )
-                    if not already_present:
-                        self.completed_laps.append({
-                            "lap_number": len(self.completed_laps) + 1,
-                            "lap_time_str": lap_t_str,
-                            "metadata": meta,
-                            "telemetry": ldata["telemetry"]
-                        })
-
+        self.ghosts_revision += 1
+        n = len(self.library.records(track, car))
+        if n:
+            print(f"[SessionManager] {track} / {car}: {n} volta(s) no catálogo.")
         return loaded
+
+    def _import_legacy_best_lap(self, track: str, car: str,
+                                state: TelemetryState) -> None:
+        """
+        Traz o `best_lap_ghost.json` das versões anteriores para o catálogo.
+
+        Antes o Personal Best era um arquivo único, sobrescrito a cada recorde.
+        Agora ele é derivado do catálogo — então a volta que estava naquele
+        arquivo precisa entrar no catálogo, senão quem atualiza o app perde o
+        próprio recorde. Entra fixada com alfinete, para a retenção nunca comê-la.
+
+        Roda uma vez: depois de importado, o arquivo antigo vira
+        `best_lap_ghost.json.imported` e sai do caminho.
+        """
+        legacy_path = os.path.join(self.data_dir, track, car, "best_lap_ghost.json")
+        if not os.path.exists(legacy_path):
+            return
+        data = _read_json_safe(legacy_path)
+        if data is None or "telemetry" not in data:
+            # _read_json_safe já isolou o arquivo como .corrupt
+            return
+
+        meta = data.get("metadata", {}) or {}
+        telemetry = data["telemetry"]
+        record = self.library.save_lap(
+            track, car,
+            telemetry=telemetry,
+            lap_time_str=meta.get("lap_time_str", "") or "",
+            sector_times_ms=list(meta.get("sector_times_ms", [0, 0, 0]))[:3],
+            lap_number=int(meta.get("lap_number", 0) or 0),
+            session_id=meta.get("timestamp", "")[:10] or "importado",
+            full_lap=covers_full_lap(telemetry, getattr(state, "track_length", 0.0)),
+            valid=True,
+            manual=False,
+            # Preserva a data original, para a volta não parecer de hoje
+            extra_metadata=({"timestamp": meta["timestamp"]}
+                            if meta.get("timestamp") else None),
+        )
+        if record is None:
+            return
+        self.library.set_pinned(track, car, record.lap_id, True)
+        print("[SessionManager] Personal Best da versão anterior importado "
+              f"para o catálogo ({record.lap_time_str or 'sem tempo'}).")
+        try:
+            os.replace(legacy_path, f"{legacy_path}.imported")
+        except OSError as e:
+            print(f"[SessionManager] PB antigo importado, mas não consegui "
+                  f"renomear o arquivo original: {e}")

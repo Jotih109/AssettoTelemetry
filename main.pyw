@@ -13,6 +13,8 @@ o jogo e entrar na pista — o dashboard conecta sozinho e reconecta sozinho
 se você sair para o menu ou fechar/reabrir o jogo.
 """
 
+import argparse
+import os
 import sys
 import traceback
 from PyQt5.QtWidgets import QApplication
@@ -20,6 +22,7 @@ from PyQt5.QtWidgets import QApplication
 from providers.assettocorsa import AssettoCorsaTelemetryProvider
 from providers.mock import MockTelemetryProvider
 from core.engine import TelemetryEngine
+from core.config import get_config
 from ui.main_window import DashboardMainWindow
 
 
@@ -42,21 +45,41 @@ def _install_crash_guard():
     sys.excepthook = hook
 
 # --------------------------------------------------------------------------
-# MOCK_MODE
+# Modo simulação
 # --------------------------------------------------------------------------
-# True  -> usa o MockTelemetryProvider (simulador interno, sem o jogo aberto).
-#          Ideal para testar a interface e a lógica de setores/deltas/gráficos
-#          numa máquina onde o Assetto Corsa não está instalado.
-# False -> usa o AssettoCorsaTelemetryProvider real (memória compartilhada).
-MOCK_MODE = False
+# O MockTelemetryProvider gera telemetria interna, para testar a interface e a
+# lógica de setores/deltas/gráficos numa máquina sem o Assetto Corsa instalado.
+#
+# Antes era preciso EDITAR ESTA LINHA para ligá-lo. Agora, em ordem de
+# precedência:
+#     python main.pyw --mock        (ou --no-mock, para forçar o jogo real)
+#     APEXVIEW_MOCK=1 python main.pyw
+#     "mock_mode": true             no config.json
+def _resolve_mock_mode(argv=None) -> bool:
+    parser = argparse.ArgumentParser(
+        prog="main.pyw", add_help=True,
+        description="ApexView — dashboard de telemetria para Assetto Corsa")
+    grupo = parser.add_mutually_exclusive_group()
+    grupo.add_argument("--mock", dest="mock", action="store_true", default=None,
+                       help="usa o simulador interno, sem o jogo aberto")
+    grupo.add_argument("--no-mock", dest="mock", action="store_false",
+                       help="força o provider real, ignorando o config.json")
+    args, _desconhecidos = parser.parse_known_args(argv)
+
+    if args.mock is not None:
+        return args.mock
+    env = os.environ.get("APEXVIEW_MOCK", "").strip().lower()
+    if env:
+        return env not in ("0", "false", "no", "nao", "não", "")
+    return bool(get_config().get("mock_mode"))
 
 
 def main():
     _install_crash_guard()
     app = QApplication(sys.argv)
 
-    if MOCK_MODE:
-        print("[*] MOCK_MODE ativo — usando simulador interno de telemetria (sem o AC).")
+    if _resolve_mock_mode():
+        print("[*] Modo simulação ativo — telemetria interna (sem o AC).")
         provider = MockTelemetryProvider()
     else:
         print("[*] Aguardando o Assetto Corsa... (nada a configurar no jogo)")

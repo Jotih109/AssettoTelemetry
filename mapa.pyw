@@ -1,427 +1,760 @@
-import math
+"""
+mapa.pyw — Análise pós-sessão (offline)
+========================================
+
+Abre as voltas que o dashboard gravou e deixa comparar até quatro delas
+sobrepostas, com o traçado no mapa, os canais por distância e o delta contra
+a primeira volta selecionada.
+
+Não conecta no jogo e não grava nada: é a tela para depois da sessão, quando
+o capacete já saiu.
+
+    python mapa.pyw
+
+Antes esta tela tinha um sistema de gravação SÓ DELA (`core/storage.py`,
+pasta `telemetry_sessions/`), com nomes de canal diferentes dos do app
+principal — `x`/`z`/`throttle` em vez de `car_x`/`car_z`/`gas`. Na prática
+isso significava que ela nunca conseguiria abrir uma volta gravada pelo
+dashboard. Agora as duas leem o mesmo catálogo (`core/lap_library.py`).
+"""
+
+import os
 import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QLabel, QHBoxLayout, QSplitter, QPushButton, QFrame, QGridLayout, QListWidget, QListWidgetItem
-from PyQt5.QtCore import Qt, pyqtSlot
-from PyQt5.QtGui import QFont, QColor
+from typing import Optional
+
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QSplitter, QPushButton, QTreeWidget, QTreeWidgetItem, QFileDialog,
+    QAbstractItemView, QComboBox, QMenu, QDialog, QTextEdit,
+)
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QColor
 import pyqtgraph as pg
 
-from core.engine import TelemetryEngine
-from providers.assettocorsa import AssettoCorsaTelemetryProvider
-from providers.mock import MockTelemetryProvider
-from core.models import TelemetryState
-from core.storage import TelemetryStorageManager
+from core.lap_library import LapLibrary, LapRecord, RetentionPolicy
+from ui import theme as T
 
-MOCK_MODE = False
+#: Cores das voltas sobrepostas, na ordem de seleção. A primeira é a base:
+#: é contra ela que o delta das outras é medido.
+LAP_COLORS = ("#00e5ff", "#ffb300", "#00e676", "#ff5252")
 
-# --- Cores Estilo MoTeC ---
-BG_MAIN = "#141414"
-BG_PLOT = "#000000"
-COLOR_TEXT = "#dcdcdc"
-COLOR_GAS = "#00e600"
-COLOR_BRAKE = "#ff3333"
-COLOR_COAST = "#ffb300"
-COLOR_CURSOR = "#ffffff"
-COLOR_GRID = "#333333"
-COLOR_GHOST = "#666666"
+#: Quantas voltas dá para sobrepor de uma vez. Mais que isto e os gráficos
+#: viram um novelo — a leitura útil é comparar duas ou três.
+MAX_LAPS = len(LAP_COLORS)
 
-def parse_lap_time(time_str):
-    if not time_str or time_str == "--:--.---": return 0.0
-    try:
-        parts = time_str.split(":")
-        minutes = int(parts[0])
-        seconds = float(parts[1])
-        return minutes * 60 + seconds
-    except:
-        return 0.0
+#: Canais desenhados, na ordem, com o rótulo e o fator de escala para exibição
+CHANNELS = (
+    ("speed", "Velocidade (km/h)", 1.0),
+    ("gas", "Acelerador (%)", 100.0),
+    ("brake", "Freio (%)", 100.0),
+    ("steer", "Volante (°)", 1.0),
+)
 
-class TrackMapWindow(QMainWindow):
-    def __init__(self, engine: TelemetryEngine):
+
+def fmt_bytes(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} GB"
+
+
+class LapAnalysisWindow(QMainWindow):
+    """Navegador do catálogo de voltas + comparação sobreposta."""
+
+    def __init__(self, library: LapLibrary):
         super().__init__()
-        self.setWindowTitle("MoTeC i2 Style Track Map & Telemetry")
-        self.resize(1200, 800)
-        self.setStyleSheet(f"background-color: {BG_MAIN}; color: {COLOR_TEXT};")
-        
-        self.engine = engine
-        self.engine.on_update.connect(self.on_telemetry_update)
-        
-        self.storage = TelemetryStorageManager()
-        self.session_started = False
-        self.current_lap_number = 0
-        
-        self.reset_lap_data()
-        
-        self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget)
-        
-        # Layout Principal Horizontal (Esquerda: Sidebar | Direita: Map+Gráficos)
-        self.main_layout = QHBoxLayout(self.central_widget)
-        self.main_layout.setContentsMargins(5, 5, 5, 5)
-        self.main_layout.setSpacing(5)
-        
-        # --- Sidebar (Esquerda) ---
-        self.sidebar_frame = QFrame()
-        self.sidebar_frame.setFixedWidth(220)
-        self.sidebar_frame.setStyleSheet(f"background-color: {BG_PLOT}; border: 1px solid #333;")
-        sidebar_layout = QVBoxLayout(self.sidebar_frame)
-        sidebar_layout.setContentsMargins(5, 5, 5, 5)
-        
-        lbl_sidebar = QLabel("SESSIONS & LAPS")
-        lbl_sidebar.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        lbl_sidebar.setStyleSheet("color: #888; border: none;")
-        sidebar_layout.addWidget(lbl_sidebar)
-        
-        self.lap_list = QListWidget()
-        self.lap_list.setStyleSheet("""
-            QListWidget { background-color: #111; color: #ddd; border: none; }
-            QListWidget::item:selected { background-color: #444; color: white; }
+        self.library = library
+        #: [(track, car, LapRecord)] das voltas exibidas, na ordem de seleção
+        self.selected = []
+        #: [(LapRecord, telemetria, eixo_x, cor)] do que está desenhado
+        self._loaded = []
+
+        self.setWindowTitle("ApexView — Análise pós-sessão")
+        self.resize(1400, 880)
+        self.setStyleSheet(T.app_qss())
+
+        self._build_ui()
+        self.reload_catalog()
+
+    # -- construção ----------------------------------------------------------
+
+    def _build_ui(self):
+        pg.setConfigOption('background', T.BG_PANEL)
+        pg.setConfigOption('foreground', T.TXT_UNIT)
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QHBoxLayout(central)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(4)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self._build_browser())
+        splitter.addWidget(self._build_charts())
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([360, 1040])
+        root.addWidget(splitter)
+
+    def _build_browser(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        title = QLabel("VOLTAS GRAVADAS")
+        title.setFont(T.f_title(10))
+        title.setStyleSheet(f"color: {T.TXT_TITLE}; background: transparent;")
+        layout.addWidget(title)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Volta", "Tempo", "Data"])
+        self.tree.setColumnWidth(0, 170)
+        self.tree.setColumnWidth(1, 80)
+        # Seleção múltipla: é o que permite sobrepor voltas
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tree.itemSelectionChanged.connect(self.on_selection_changed)
+        self.tree.setStyleSheet(f"""
+            QTreeWidget {{
+                background-color: {T.BG_INSET};
+                color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER};
+                font-family: "{T.FONT_UI}";
+                font-size: 12px;
+                outline: none;
+            }}
+            QTreeWidget::item:selected {{
+                background-color: {T.BG_HEADER}; color: #ffffff;
+            }}
+            QHeaderView::section {{
+                background-color: {T.BG_HEADER}; color: {T.TXT_TITLE};
+                border: none; padding: 4px; font-size: 11px;
+            }}
         """)
-        self.lap_list.itemClicked.connect(self.on_lap_selected)
-        sidebar_layout.addWidget(self.lap_list)
-        
-        self.btn_refresh_laps = QPushButton("↻ Refresh List")
-        self.btn_refresh_laps.setStyleSheet("background: #333; color: white; padding: 5px;")
-        self.btn_refresh_laps.clicked.connect(self.refresh_sessions_list)
-        sidebar_layout.addWidget(self.btn_refresh_laps)
-        
-        self.main_layout.addWidget(self.sidebar_frame)
-        
-        # --- Área Principal (Direita) ---
-        self.right_widget = QWidget()
-        self.right_layout = QVBoxLayout(self.right_widget)
-        self.right_layout.setContentsMargins(0, 0, 0, 0)
-        self.right_layout.setSpacing(5)
-        
-        self.is_analysis_mode = False
-        
-        # Top Bar
-        top_bar = QHBoxLayout()
-        top_bar.setContentsMargins(0, 0, 0, 0)
-        
-        self.info_frame = QFrame()
-        self.info_frame.setStyleSheet(f"background-color: {BG_PLOT}; border: 1px solid #333;")
-        info_layout = QGridLayout(self.info_frame)
-        info_layout.setContentsMargins(15, 8, 15, 8)
-        info_layout.setHorizontalSpacing(30)
-        
-        font_lbl = QFont("Segoe UI", 9, QFont.Bold)
-        font_val = QFont("Consolas", 11)
-        
-        self.lbl_dist = self._create_value_label("DIST", COLOR_TEXT, font_lbl, font_val, info_layout, 0)
-        self.lbl_x = self._create_value_label("X POS", COLOR_TEXT, font_lbl, font_val, info_layout, 1)
-        self.lbl_z = self._create_value_label("Z POS", COLOR_TEXT, font_lbl, font_val, info_layout, 2)
-        self.lbl_gas = self._create_value_label("THROTTLE", COLOR_GAS, font_lbl, font_val, info_layout, 3)
-        self.lbl_brake = self._create_value_label("BRAKE", COLOR_BRAKE, font_lbl, font_val, info_layout, 4)
-        
-        self.btn_mode = QPushButton("► LIVE")
-        self.btn_mode.setFixedSize(140, 40)
-        self.btn_mode.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        self.btn_mode.setStyleSheet("""
-            QPushButton { background: #333; color: white; border: 1px solid #555; }
-            QPushButton:hover { background: #444; }
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._on_tree_context_menu)
+        layout.addWidget(self.tree, 1)
+
+        self.lbl_status = QLabel("")
+        self.lbl_status.setWordWrap(True)
+        self.lbl_status.setStyleSheet(
+            f"color: {T.TXT_UNIT}; background: transparent; font-size: 11px;")
+        layout.addWidget(self.lbl_status)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(4)
+        for text, slot, tip in (
+            ("ATUALIZAR", self.reload_catalog, "Relê o catálogo do disco"),
+            ("📌 FIXAR", self.on_pin_clicked,
+             "Protege a volta selecionada da limpeza automática"),
+            ("RELATÓRIO", self.on_generate_report,
+             "Gera relatório analítico completo de desempenho (pontos positivos, negativos e onde melhorar)"),
+            ("CSV", self.on_export_csv,
+             "Exporta a volta selecionada como CSV"),
+            ("MoTeC (.ld)", self.on_export_motec,
+             "Exporta a volta selecionada para o formato MoTeC i2 (.ld)"),
+            ("APAGAR", self.on_delete_clicked,
+             "Apaga do disco as voltas selecionadas"),
+        ):
+            btn = QPushButton(text)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setToolTip(tip)
+            btn.clicked.connect(slot)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {T.BG_INSET}; color: {T.TXT_VALUE};
+                    border: 1px solid {T.BORDER}; padding: 5px 6px;
+                    font-family: "{T.FONT_UI}"; font-size: 11px; font-weight: bold;
+                }}
+                QPushButton:hover {{ background-color: {T.BG_HEADER}; color: #fff; }}
+            """)
+            buttons.addWidget(btn)
+        layout.addLayout(buttons)
+        return panel
+
+    def _build_charts(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        header = QHBoxLayout()
+        self.lbl_laps = QLabel("Selecione uma volta à esquerda "
+                               "(Ctrl+clique compara várias)")
+        self.lbl_laps.setStyleSheet(
+            f"color: {T.TXT_VALUE}; background: transparent; font-size: 12px;")
+        header.addWidget(self.lbl_laps, 1)
+
+        header.addWidget(QLabel("Eixo X:"))
+        self.combo_axis = QComboBox()
+        self.combo_axis.addItem("Distância (m)", "distance")
+        self.combo_axis.addItem("Tempo (s)", "times")
+        self.combo_axis.currentIndexChanged.connect(self.redraw)
+        self.combo_axis.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {T.BG_INSET}; color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER}; padding: 3px 8px; font-size: 12px;
+            }}
         """)
-        self.btn_mode.clicked.connect(self.toggle_mode)
-        
-        top_bar.addWidget(self.info_frame)
-        top_bar.addStretch()
-        top_bar.addWidget(self.btn_mode)
-        
-        self.right_layout.addLayout(top_bar)
-        
-        # Splitter (Map + Graph)
-        self.splitter = QSplitter(Qt.Vertical)
-        self.right_layout.addWidget(self.splitter)
-        
-        # Track Map
-        self.map_widget = pg.PlotWidget()
-        self.map_widget.setBackground(BG_PLOT)
-        self.map_widget.showGrid(x=False, y=False)
-        self.map_widget.hideAxis('left')
-        self.map_widget.hideAxis('bottom')
-        self.map_widget.setAspectLocked(True)
-        self.map_widget.setStyleSheet("border: 1px solid #333;")
-        self.splitter.addWidget(self.map_widget)
-        
-        # Telemetry Graph
-        self.telem_widget = pg.PlotWidget()
-        self.telem_widget.setBackground(BG_PLOT)
-        self.telem_widget.setStyleSheet("border: 1px solid #333;")
-        self.telem_widget.showGrid(x=True, y=True, alpha=0.3)
-        self.telem_widget.getAxis('left').setPen(pg.mkPen(color=COLOR_GRID))
-        self.telem_widget.getAxis('bottom').setPen(pg.mkPen(color=COLOR_GRID))
-        self.telem_widget.getAxis('left').setTextPen(pg.mkPen(color=COLOR_TEXT))
-        self.telem_widget.getAxis('bottom').setTextPen(pg.mkPen(color=COLOR_TEXT))
-        self.telem_widget.setYRange(-0.05, 1.05)
-        self.telem_widget.setLabel('left', 'Pedal Input', color=COLOR_TEXT)
-        self.telem_widget.setLabel('bottom', 'Distance (m)', color=COLOR_TEXT)
-        self.splitter.addWidget(self.telem_widget)
-        
-        self.splitter.setSizes([500, 300])
-        
-        # Visual Elements
-        self.track_curve = pg.ScatterPlotItem(size=3, pen=None)
-        self.map_widget.addItem(self.track_curve)
-        
-        self.car_marker = pg.ScatterPlotItem(size=12, pen=pg.mkPen(COLOR_CURSOR, width=2), brush=pg.mkBrush(0, 0, 0, 0))
-        self.map_widget.addItem(self.car_marker)
-        
-        self.gas_curve = self.telem_widget.plot(pen=pg.mkPen(COLOR_GAS, width=1.5))
-        self.brake_curve = self.telem_widget.plot(pen=pg.mkPen(COLOR_BRAKE, width=1.5))
-        
-        # Ghost curves (Reference Lap)
-        self.ghost_gas_curve = self.telem_widget.plot(pen=pg.mkPen(color=COLOR_GHOST, style=Qt.DashLine, width=1.5))
-        self.ghost_gas_curve.setOpacity(0.5)
-        self.ghost_brake_curve = self.telem_widget.plot(pen=pg.mkPen(color=COLOR_GHOST, style=Qt.DashLine, width=1.5))
-        self.ghost_brake_curve.setOpacity(0.5)
-        
-        self.cursor_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(COLOR_CURSOR, width=1))
-        self.cursor_line.sigDragged.connect(self.on_cursor_dragged)
-        self.telem_widget.addItem(self.cursor_line)
-        
-        self.main_layout.addWidget(self.right_widget)
-        self.refresh_sessions_list()
+        header.addWidget(self.combo_axis)
+        layout.addLayout(header)
 
-    def reset_lap_data(self):
-        self.lap_data = {
-            "distance": [], "x": [], "z": [], "speed": [],
-            "throttle": [], "brake": [], "steer": [], "gear": [], "rpm": [], "delta": [], "colors": []
-        }
-        self.last_recorded_x = None
-        self.last_recorded_z = None
+        body = QSplitter(Qt.Horizontal)
 
-    def _create_value_label(self, title, color, font_lbl, font_val, layout, col):
-        lbl_title = QLabel(title)
-        lbl_title.setFont(font_lbl)
-        lbl_title.setStyleSheet(f"color: #888; border: none;")
-        
-        lbl_val = QLabel("0.0")
-        lbl_val.setFont(font_val)
-        lbl_val.setStyleSheet(f"color: {color}; font-weight: bold; border: none;")
-        
-        layout.addWidget(lbl_title, 0, col, Qt.AlignLeft | Qt.AlignBottom)
-        layout.addWidget(lbl_val, 1, col, Qt.AlignLeft | Qt.AlignTop)
-        return lbl_val
+        # --- Mapa da pista ---
+        self.map_plot = pg.PlotWidget()
+        self.map_plot.setAspectLocked(True)
+        self.map_plot.hideAxis('bottom')
+        self.map_plot.hideAxis('left')
+        self.map_plot.setMenuEnabled(False)
+        body.addWidget(self.map_plot)
 
-    def toggle_mode(self):
-        self.is_analysis_mode = not self.is_analysis_mode
-        self.cursor_line.setMovable(self.is_analysis_mode)
-        
-        if self.is_analysis_mode:
-            self.btn_mode.setText("❚❚ ANALYSIS")
-            self.btn_mode.setStyleSheet("""
-                QPushButton { background: #660000; color: white; border: 1px solid #ff3333; }
-                QPushButton:hover { background: #880000; }
-            """)
-        else:
-            self.btn_mode.setText("► LIVE")
-            self.btn_mode.setStyleSheet("""
-                QPushButton { background: #333; color: white; border: 1px solid #555; }
-                QPushButton:hover { background: #444; }
-            """)
-            # Se voltar pro Live, limpa a tela de análise e desenha os dados ao vivo que acumulamos
-            self.track_curve.setData(x=self.lap_data["x"], y=self.lap_data["z"], brush=self.lap_data["colors"])
-            self.gas_curve.setData(x=self.lap_data["distance"], y=self.lap_data["throttle"])
-            self.brake_curve.setData(x=self.lap_data["distance"], y=self.lap_data["brake"])
-            self.ghost_gas_curve.setData(x=[], y=[])
-            self.ghost_brake_curve.setData(x=[], y=[])
+        # --- Pilha de gráficos ---
+        stack_host = QWidget()
+        stack = QVBoxLayout(stack_host)
+        stack.setContentsMargins(0, 0, 0, 0)
+        stack.setSpacing(2)
 
-    def refresh_sessions_list(self):
-        self.lap_list.clear()
-        sessions = self.storage.load_sessions()
-        for sess in sessions:
-            # Sessão header
-            date_str = sess.get('date', '')[:10]
-            header = QListWidgetItem(f"[{date_str}] {sess.get('track_name')} - {sess.get('car_model')}")
-            header.setBackground(QColor("#222"))
-            header.setForeground(QColor("#aaa"))
-            header.setFlags(Qt.ItemIsEnabled) # Não selecionável
-            self.lap_list.addItem(header)
-            
-            best_idx = sess.get("fastest_lap_index", -1)
-            
-            for i, lap in enumerate(sess.get('laps', [])):
-                is_best = "★ " if i == best_idx else "   "
-                lap_text = f"{is_best}Lap {lap['lap_number']:02d}: {lap['lap_time']}"
-                item = QListWidgetItem(lap_text)
-                
-                # Guarda dados invisíveis no item para carregar depois
-                item.setData(Qt.UserRole, {
-                    'session_dir': sess['session_dir'],
-                    'file_path': lap['file_path'],
-                    'is_best': (i == best_idx)
-                })
-                self.lap_list.addItem(item)
-                
-            self.lap_list.addItem(QListWidgetItem("")) # Spacer
-
-    def on_lap_selected(self, item):
-        data = item.data(Qt.UserRole)
-        if not data: return
-        
-        lap_json = self.storage.load_lap_data(self.storage.base_dir, data['session_dir'], data['file_path'])
-        if not lap_json: return
-        
-        # Muda pro modo análise automaticamente
-        if not self.is_analysis_mode:
-            self.toggle_mode()
-            
-        telemetry = lap_json.get("telemetry", {})
-        dist = telemetry.get("distance", [])
-        x = telemetry.get("x", [])
-        z = telemetry.get("z", [])
-        gas = telemetry.get("throttle", [])
-        brake = telemetry.get("brake", [])
-        
-        # Limpa e exibe apenas a volta histórica
-        colors = []
-        for g, b in zip(gas, brake):
-            if g > 0.1:
-                intensity = min(255, int(100 + g * 155))
-                colors.append(pg.mkBrush(0, intensity, 0, 255))
-            elif b > 0.1:
-                intensity = min(255, int(100 + b * 155))
-                colors.append(pg.mkBrush(intensity, 0, 0, 255))
+        self.plots = {}
+        self.cursors = {}
+        first = None
+        for key, label, _scale in CHANNELS + (("__delta__", "Delta (s)", 1.0),):
+            plot = pg.PlotWidget()
+            plot.showGrid(x=True, y=True, alpha=0.15)
+            plot.setMenuEnabled(False)
+            plot.getAxis('left').setWidth(58)
+            plot.setLabel('left', label)
+            if first is None:
+                first = plot
             else:
-                colors.append(pg.mkBrush(QColor(COLOR_COAST)))
-                
-        self.track_curve.setData(x=x, y=z, brush=colors)
-        self.gas_curve.setData(x=dist, y=gas)
-        self.brake_curve.setData(x=dist, y=brake)
-        
-        # Guarda na lap_data TEMPORARIA pra o cursor funcionar no modo analise
-        self.lap_data["distance"] = dist
-        self.lap_data["x"] = x
-        self.lap_data["z"] = z
-        self.lap_data["throttle"] = gas
-        self.lap_data["brake"] = brake
-        
-        if dist:
-            self.cursor_line.setValue(dist[0])
-            self.on_cursor_dragged()
-            
-    def on_cursor_dragged(self):
-        if not self.is_analysis_mode or not self.lap_data["distance"]:
+                # Uma régua de X só: arrastar num gráfico move todos
+                plot.setXLink(first)
+            cursor = pg.InfiniteLine(angle=90, movable=False,
+                                     pen=pg.mkPen("#ffffff", width=1))
+            plot.addItem(cursor)
+            self.cursors[key] = cursor
+            self.plots[key] = plot
+            stack.addWidget(plot)
+
+        body.addWidget(stack_host)
+        body.setSizes([420, 900])
+        layout.addWidget(body, 1)
+
+        self.lbl_readout = QLabel("")
+        self.lbl_readout.setStyleSheet(
+            f"color: {T.TXT_VALUE}; background: {T.BG_INSET}; "
+            f"border: 1px solid {T.BORDER}; padding: 4px; font-size: 12px;")
+        layout.addWidget(self.lbl_readout)
+
+        # O cursor acompanha o mouse sobre qualquer gráfico da pilha
+        for plot in self.plots.values():
+            plot.scene().sigMouseMoved.connect(self._make_mouse_handler(plot))
+        return panel
+
+    # -- catálogo ------------------------------------------------------------
+
+    def reload_catalog(self):
+        """Remonta a árvore Pista > Carro > Sessão > Volta."""
+        self.tree.blockSignals(True)
+        self.tree.clear()
+
+        total_bytes = 0
+        total_laps = 0
+        for combo in self.library.catalog():
+            track, car = combo["track"], combo["car"]
+            total_bytes += combo["bytes"]
+            total_laps += combo["laps"]
+
+            best = combo["best"]
+            top = QTreeWidgetItem([f"{track} — {car}",
+                                   best.lap_time_str if best else "",
+                                   f"{combo['laps']} voltas"])
+            top.setForeground(0, QColor(T.TXT_TITLE))
+            self.tree.addTopLevelItem(top)
+
+            for session in self.library.sessions(track, car):
+                node = QTreeWidgetItem([
+                    f"Sessão {session['date_str'] or session['session_id']}",
+                    session["best"].lap_time_str if session["best"] else "",
+                    f"{len(session['laps'])} voltas"])
+                node.setForeground(0, QColor(T.TXT_UNIT))
+                top.addChild(node)
+
+                for rec in session["laps"]:
+                    leaf = QTreeWidgetItem([rec.label(with_date=False),
+                                            rec.lap_time_str, rec.date_str])
+                    # É por aqui que a seleção sabe qual volta é qual
+                    leaf.setData(0, Qt.UserRole, (track, car, rec.lap_id))
+                    if not rec.valid:
+                        leaf.setForeground(0, QColor("#c98a00"))
+                    if best is not None and rec.lap_id == best.lap_id:
+                        leaf.setForeground(1, QColor("#00e676"))
+                    node.addChild(leaf)
+
+        self.tree.expandToDepth(0)
+        self.tree.blockSignals(False)
+
+        if total_laps:
+            self.lbl_status.setText(
+                f"{total_laps} voltas gravadas · {fmt_bytes(total_bytes)} em disco")
+        else:
+            self.lbl_status.setText(
+                "Nenhuma volta gravada ainda. Rode o dashboard "
+                "(main.pyw) e entre na pista.")
+
+    def _selected_records(self):
+        """[(track, car, LapRecord)] do que está marcado na árvore."""
+        out = []
+        for item in self.tree.selectedItems():
+            data = item.data(0, Qt.UserRole)
+            if not data:
+                continue
+            track, car, lap_id = data
+            rec = self.library.find(track, car, lap_id)
+            if rec is not None:
+                out.append((track, car, rec))
+        return out
+
+    # -- desenho -------------------------------------------------------------
+
+    def on_selection_changed(self):
+        self.selected = self._selected_records()[:MAX_LAPS]
+        self.redraw()
+
+    def redraw(self):
+        for plot in self.plots.values():
+            plot.clear()
+        for key, cursor in self.cursors.items():
+            self.plots[key].addItem(cursor)
+        self.map_plot.clear()
+        self._loaded = []
+
+        if not self.selected:
+            self.lbl_laps.setText("Selecione uma volta à esquerda "
+                                  "(Ctrl+clique compara várias)")
+            self.lbl_readout.setText("")
             return
-            
-        val = self.cursor_line.value()
+
+        axis_key = self.combo_axis.currentData()
+        legend = []
+
+        for i, (track, car, rec) in enumerate(self.selected):
+            telemetry = self.library.load_telemetry(track, car, rec)
+            if not telemetry:
+                continue
+            color = LAP_COLORS[i % len(LAP_COLORS)]
+            x = telemetry.get(axis_key) or telemetry.get("times") or []
+            self._loaded.append((rec, telemetry, x, color))
+
+            for key, _label, scale in CHANNELS:
+                values = telemetry.get(key) or []
+                n = min(len(x), len(values))
+                if n < 2:
+                    continue
+                self.plots[key].plot(x[:n], [v * scale for v in values[:n]],
+                                     pen=pg.mkPen(color, width=1))
+
+            cx, cz = telemetry.get("car_x") or [], telemetry.get("car_z") or []
+            if len(cx) >= 2 and len(cz) >= 2:
+                n = min(len(cx), len(cz))
+                self.map_plot.plot(cx[:n], cz[:n], pen=pg.mkPen(color, width=2))
+
+            legend.append(
+                f'<span style="color:{color};">■</span> '
+                f'{track} / {car} — Volta {rec.lap_number} '
+                f'{rec.lap_time_str}{"" if rec.valid else " ⚠"}')
+
+        self._draw_delta(axis_key)
+        self.lbl_laps.setText("&nbsp;&nbsp;".join(legend))
+
+    def _draw_delta(self, axis_key: str):
+        """
+        Delta das demais voltas contra a PRIMEIRA selecionada, interpolado por
+        distância — comparar por tempo daria a diferença errada assim que uma
+        volta ficasse para trás da outra.
+        """
+        plot = self.plots["__delta__"]
+        if len(self._loaded) < 2:
+            return
+        base_rec, base_tel, _bx, _bc = self._loaded[0]
+        base_d = base_tel.get("distance") or []
+        base_t = base_tel.get("times") or []
+        if len(base_d) < 2 or len(base_d) != len(base_t):
+            return
+
         import bisect
-        idx = bisect.bisect_left(self.lap_data["distance"], val)
-        if idx >= len(self.lap_data["distance"]):
-            idx = len(self.lap_data["distance"]) - 1
-            
-        x = self.lap_data["x"][idx]
-        z = self.lap_data["z"][idx]
-        gas = self.lap_data["throttle"][idx]
-        brake = self.lap_data["brake"][idx]
-        
-        self.car_marker.setData([x], [z])
-        self.update_info_panel(val, x, z, gas, brake)
+        for rec, telemetry, x, color in self._loaded[1:]:
+            dists = telemetry.get("distance") or []
+            times = telemetry.get("times") or []
+            n = min(len(dists), len(times), len(x))
+            if n < 2:
+                continue
+            xs, deltas = [], []
+            for i in range(n):
+                d = dists[i]
+                # Fora da faixa que a base cobre não existe delta: extrapolar
+                # inventaria dezenas de segundos numa volta parcial.
+                if d < base_d[0] or d > base_d[-1]:
+                    continue
+                j = bisect.bisect_left(base_d, d)
+                if j <= 0:
+                    ref = base_t[0]
+                elif j >= len(base_d):
+                    ref = base_t[-1]
+                else:
+                    d0, d1 = base_d[j - 1], base_d[j]
+                    t0, t1 = base_t[j - 1], base_t[j]
+                    ratio = (d - d0) / (d1 - d0) if d1 != d0 else 0.0
+                    ref = t0 + ratio * (t1 - t0)
+                xs.append(x[i])
+                deltas.append(times[i] - ref)
+            if len(xs) >= 2:
+                plot.plot(xs, deltas, pen=pg.mkPen(color, width=1))
+        plot.addLine(y=0, pen=pg.mkPen("#666666", style=Qt.DashLine))
 
-    def update_info_panel(self, dist, x, z, gas, brake):
-        self.lbl_dist.setText(f"{dist:.1f} m")
-        self.lbl_x.setText(f"{x:.1f}")
-        self.lbl_z.setText(f"{z:.1f}")
-        self.lbl_gas.setText(f"{gas*100:.0f} %")
-        self.lbl_brake.setText(f"{brake*100:.0f} %")
+    def _make_mouse_handler(self, plot):
+        def handler(pos):
+            if not getattr(self, "_loaded", None):
+                return
+            if not plot.sceneBoundingRect().contains(pos):
+                return
+            x = plot.getPlotItem().vb.mapSceneToView(pos).x()
+            for cursor in self.cursors.values():
+                cursor.setValue(x)
+            self._update_readout(x)
+        return handler
 
-    @pyqtSlot(TelemetryState)
-    def on_telemetry_update(self, state: TelemetryState):
-        if not state.is_connected:
-            if not self.is_analysis_mode:
-                self.lbl_dist.setText("WAITING...")
+    def _update_readout(self, x: float):
+        import bisect
+        parts = []
+        for rec, telemetry, xs, color in self._loaded:
+            if len(xs) < 2:
+                continue
+            i = min(bisect.bisect_left(xs, x), len(xs) - 1)
+
+            def at(key, scale=1.0, nd=0):
+                arr = telemetry.get(key) or []
+                return f"{arr[i] * scale:.{nd}f}" if i < len(arr) else "--"
+
+            parts.append(
+                f'<span style="color:{color};">'
+                f'V{rec.lap_number}: {at("speed")} km/h · '
+                f'gás {at("gas", 100.0)}% · freio {at("brake", 100.0)}% · '
+                f'{at("gear", 1.0)}ª · {at("rpm")} rpm</span>')
+        self.lbl_readout.setText("&nbsp;&nbsp;|&nbsp;&nbsp;".join(parts))
+
+    # -- ações ---------------------------------------------------------------
+
+    def on_pin_clicked(self):
+        marcadas = self._selected_records()
+        if not marcadas:
             return
-            
-        # 1. Inicia Sessão Nova se conectou agora
-        if not self.session_started:
-            self.storage.start_new_session(state.track_name, state.car_name)
-            self.session_started = True
-            self.current_lap_number = state.lap_number
-            self.reset_lap_data()
-            
-        # 2. Detecção de Nova Volta
-        if state.lap_number > self.current_lap_number:
-            # Fechou a volta anterior. Salva no JSON se houver dados (e não for a volta 1 de saída)
-            if len(self.lap_data["distance"]) > 50 and self.current_lap_number > 0:
-                lap_time_s = parse_lap_time(state.last_time)
-                # Passa uma cópia sem colors
-                save_data = {k: v for k, v in self.lap_data.items() if k != 'colors'}
-                self.storage.save_lap(
-                    lap_number=self.current_lap_number,
-                    lap_time_str=state.last_time,
-                    lap_time_seconds=lap_time_s,
-                    is_valid=True,
-                    telemetry_data=save_data
-                )
-                self.refresh_sessions_list()
-                
-            self.current_lap_number = state.lap_number
-            self.reset_lap_data()
+        for track, car, rec in marcadas:
+            self.library.set_pinned(track, car, rec.lap_id, not rec.pinned)
+        self.reload_catalog()
 
-        # 3. Coleta os Dados da Volta Atual
-        x = state.car_x
-        z = state.car_z
-        gas = state.gas
-        brake = state.brake
+    def on_delete_clicked(self):
+        marcadas = self._selected_records()
+        if not marcadas:
+            return
+        for track, car, rec in marcadas:
+            self.library.delete(track, car, rec.lap_id)
+        self.selected = []
+        self.reload_catalog()
+        self.redraw()
 
-        if gas > 0.1:
-            intensity = min(255, int(100 + gas * 155))
-            color = pg.mkBrush(0, intensity, 0, 255)
-        elif brake > 0.1:
-            intensity = min(255, int(100 + brake * 155))
-            color = pg.mkBrush(intensity, 0, 0, 255)
+    def on_export_csv(self):
+        marcadas = self._selected_records()
+        if not marcadas:
+            return
+        track, car, rec = marcadas[0]
+        sugerido = f"{track}_{car}_V{rec.lap_number}_{rec.lap_time_str}.csv"
+        sugerido = sugerido.replace(":", "-").replace(" ", "_")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportar volta como CSV", sugerido, "CSV (*.csv)")
+        if not path:
+            return
+        if self.library.export_csv(track, car, rec, path):
+            self.lbl_status.setText(f"Exportado: {os.path.basename(path)}")
         else:
-            color = pg.mkBrush(QColor(COLOR_COAST)) 
-            
-        if self.last_recorded_x is not None:
-            dist_delta = math.hypot(x - self.last_recorded_x, z - self.last_recorded_z)
+            self.lbl_status.setText("Falha ao exportar (veja o console).")
+
+    def on_export_motec(self):
+        marcadas = self._selected_records()
+        if not marcadas:
+            return
+        track, car, rec = marcadas[0]
+        sugerido = f"{track}_{car}_V{rec.lap_number}_{rec.lap_time_str}.ld"
+        sugerido = sugerido.replace(":", "-").replace(" ", "_")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportar volta no formato MoTeC i2", sugerido, "MoTeC i2 Log (*.ld)")
+        if not path:
+            return
+        if not path.lower().endswith(".ld"):
+            path += ".ld"
+        if self.library.export_motec(track, car, rec, path):
+            self.lbl_status.setText(f"MoTeC exportado: {os.path.basename(path)}")
         else:
-            dist_delta = 0.0
-            
-        if self.last_recorded_x is None or dist_delta > 1.0:
-            # Acumula na memória
-            self.lap_data["distance"].append(state.distance_traveled)
-            self.lap_data["x"].append(x)
-            self.lap_data["z"].append(z)
-            self.lap_data["throttle"].append(gas)
-            self.lap_data["brake"].append(brake)
-            self.lap_data["speed"].append(state.speed_kmh)
-            self.lap_data["steer"].append(state.steer_angle)
-            self.lap_data["gear"].append(state.gear)
-            self.lap_data["rpm"].append(state.rpm)
-            self.lap_data["delta"].append(state.delta_time)
-            self.lap_data["colors"].append(color)
-            
-            self.last_recorded_x = x
-            self.last_recorded_z = z
-            
-            # 4. Atualiza a UI se estiver no Modo LIVE
-            if not self.is_analysis_mode:
-                self.track_curve.setData(x=self.lap_data["x"], y=self.lap_data["z"], brush=self.lap_data["colors"])
-                self.gas_curve.setData(x=self.lap_data["distance"], y=self.lap_data["throttle"])
-                self.brake_curve.setData(x=self.lap_data["distance"], y=self.lap_data["brake"])
-                
-                self.cursor_line.setValue(state.distance_traveled)
-                self.car_marker.setData([x], [z])
-                self.update_info_panel(state.distance_traveled, x, z, gas, brake)
+            self.lbl_status.setText("Falha ao exportar MoTeC (veja o console).")
+
+    def on_generate_report(self):
+        marcadas = self._selected_records()
+        if not marcadas:
+            self.lbl_status.setText("Selecione pelo menos uma volta para gerar o relatório.")
+            return
+        track, car, rec = marcadas[0]
+        ref_rec = marcadas[1][2] if len(marcadas) >= 2 else None
+        dlg = LapReportDialog(self, self.library, track, car, rec, ref_rec=ref_rec)
+        dlg.exec_()
+
+    def _on_tree_context_menu(self, pos):
+        marcadas = self._selected_records()
+        if not marcadas:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {T.BG_PANEL}; color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER}; font-size: 11px;
+            }}
+            QMenu::item {{
+                padding: 4px 12px;
+            }}
+            QMenu::item:selected {{
+                background-color: {T.BG_HEADER}; color: #ffffff;
+            }}
+        """)
+        act_report = menu.addAction("📊 Gerar Relatório de Desempenho")
+        act_motec = menu.addAction("Exportar MoTeC (.ld)")
+        act_csv = menu.addAction("Exportar CSV")
+        menu.addSeparator()
+        act_pin = menu.addAction("📌 Fixar / Desafixar")
+        act_del = menu.addAction("Apagar")
+
+        action = menu.exec_(self.tree.viewport().mapToGlobal(pos))
+        if action == act_report:
+            self.on_generate_report()
+        elif action == act_motec:
+            self.on_export_motec()
+        elif action == act_csv:
+            self.on_export_csv()
+        elif action == act_pin:
+            self.on_pin_clicked()
+        elif action == act_del:
+            self.on_delete_clicked()
+
+
+class LapReportDialog(QDialog):
+    """
+    Diálogo modal de visualização e exportação do Relatório de Desempenho.
+    Exibe o diagnóstico da volta (positivos, negativos, onde melhorar e o porquê),
+    permite alternar a volta de referência, copiar para o clipboard ou salvar em arquivo.
+    """
+    def __init__(self, parent, library: LapLibrary, track: str, car: str,
+                 rec: LapRecord, ref_rec: Optional[LapRecord] = None):
+        super().__init__(parent)
+        self.library = library
+        self.track = track
+        self.car = car
+        self.rec = rec
+        self.ref_rec = ref_rec
+        self._raw_content = ""
+
+        self.setWindowTitle(
+            f"Relatório de Desempenho — {track} · {car} · Volta {rec.lap_number} ({rec.lap_time_str})")
+        self.resize(960, 720)
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {T.BG_APP};
+                color: {T.TXT_VALUE};
+                font-family: "{T.FONT_UI}";
+            }}
+            QLabel {{
+                color: {T.TXT_VALUE};
+                font-size: 12px;
+            }}
+            QComboBox {{
+                background-color: {T.BG_INSET};
+                color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER};
+                padding: 4px 8px;
+                font-size: 12px;
+            }}
+            QPushButton {{
+                background-color: {T.BG_INSET};
+                color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER};
+                padding: 6px 12px;
+                font-family: "{T.FONT_UI}";
+                font-size: 11px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {T.BG_HEADER};
+                color: #ffffff;
+            }}
+            QTextEdit {{
+                background-color: {T.BG_INSET};
+                color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER};
+                padding: 10px;
+                font-family: "Consolas", "{T.FONT_MONO}", monospace;
+                font-size: 12px;
+                line-height: 1.4;
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        # Header com título e metadados
+        header_box = QHBoxLayout()
+        info_lbl = QLabel(
+            f"<b>Pista:</b> {track} &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"<b>Carro:</b> {car} &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"<b>Volta {rec.lap_number}:</b> {rec.lap_time_str}"
+        )
+        info_lbl.setStyleSheet(f"font-size: 13px; color: {T.TXT_VALUE};")
+        header_box.addWidget(info_lbl, 1)
+
+        # Seletores de Referência e Formato
+        header_box.addWidget(QLabel("Referência:"))
+        self.combo_ref = QComboBox()
+        self._populate_references()
+        self.combo_ref.currentIndexChanged.connect(self._on_params_changed)
+        header_box.addWidget(self.combo_ref)
+
+        header_box.addWidget(QLabel("Formato:"))
+        self.combo_format = QComboBox()
+        self.combo_format.addItem("Markdown Renderizado", "md_rendered")
+        self.combo_format.addItem("Markdown Código (.md)", "md_raw")
+        self.combo_format.addItem("Texto Puro (.txt)", "txt")
+        self.combo_format.currentIndexChanged.connect(self._on_params_changed)
+        header_box.addWidget(self.combo_format)
+
+        layout.addLayout(header_box)
+
+        # Área de texto do relatório
+        self.txt_content = QTextEdit()
+        self.txt_content.setReadOnly(True)
+        layout.addWidget(self.txt_content, 1)
+
+        # Barra inferior de ações
+        footer = QHBoxLayout()
+        self.lbl_msg = QLabel("")
+        self.lbl_msg.setStyleSheet(f"color: {T.TXT_UNIT}; font-size: 11px;")
+        footer.addWidget(self.lbl_msg, 1)
+
+        btn_copy = QPushButton("📋 COPIAR TEXTO")
+        btn_copy.setCursor(Qt.PointingHandCursor)
+        btn_copy.setToolTip("Copia o relatório inteiro para a área de transferência")
+        btn_copy.clicked.connect(self.on_copy)
+        footer.addWidget(btn_copy)
+
+        btn_save = QPushButton("💾 SALVAR ARQUIVO...")
+        btn_save.setCursor(Qt.PointingHandCursor)
+        btn_save.setToolTip("Salva o relatório em arquivo Markdown (.md) ou Texto (.txt)")
+        btn_save.clicked.connect(self.on_save)
+        footer.addWidget(btn_save)
+
+        btn_close = QPushButton("FECHAR")
+        btn_close.setCursor(Qt.PointingHandCursor)
+        btn_close.clicked.connect(self.accept)
+        footer.addWidget(btn_close)
+
+        layout.addLayout(footer)
+
+        self._on_params_changed()
+
+    def _populate_references(self):
+        best = self.library.best_lap(self.track, self.car)
+        all_recs = self.library.records(self.track, self.car)
+        valid_recs = [r for r in all_recs if r.lap_id != self.rec.lap_id and r.is_reference_material]
+
+        # 1. Opção Melhor Volta
+        if best and best.lap_id != self.rec.lap_id:
+            self.combo_ref.addItem(f"★ Melhor Volta (PB: {best.lap_time_str})", best)
+        
+        # 2. Outras voltas da sessão/catálogo
+        for r in valid_recs:
+            if best and r.lap_id == best.lap_id:
+                continue
+            self.combo_ref.addItem(f"Volta {r.lap_number} ({r.lap_time_str}) - {r.date_str}", r)
+
+        # 3. Sem referência
+        self.combo_ref.addItem("Sem Referência (Análise Solo)", None)
+
+        # Se passou ref_rec pré-selecionado, seleciona ele
+        if self.ref_rec:
+            for idx in range(self.combo_ref.count()):
+                item_data = self.combo_ref.itemData(idx)
+                if item_data and getattr(item_data, "lap_id", None) == self.ref_rec.lap_id:
+                    self.combo_ref.setCurrentIndex(idx)
+                    break
+
+    def _on_params_changed(self):
+        ref_rec = self.combo_ref.currentData()
+        fmt_option = self.combo_format.currentData()
+
+        # Gera o formato base (md ou txt)
+        is_txt = (fmt_option == "txt")
+        base_fmt = "txt" if is_txt else "md"
+        content = self.library.generate_lap_report(
+            self.track, self.car, self.rec, ref_rec=ref_rec, format=base_fmt)
+
+        if content is None:
+            self.txt_content.setPlainText("Não foi possível carregar a telemetria desta volta.")
+            self._raw_content = ""
+            return
+
+        self._raw_content = content
+
+        if fmt_option == "md_rendered":
+            self.txt_content.setMarkdown(content)
+        else:
+            self.txt_content.setPlainText(content)
+
+        self.lbl_msg.setText("Relatório atualizado.")
+
+    def on_copy(self):
+        if not self._raw_content:
+            return
+        QApplication.clipboard().setText(self._raw_content)
+        self.lbl_msg.setText("✓ Conteúdo copiado para a área de transferência!")
+
+    def on_save(self):
+        if not self._raw_content:
+            return
+        fmt_option = self.combo_format.currentData()
+        ext = "txt" if fmt_option == "txt" else "md"
+        filt = "Markdown (*.md);;Texto Puro (*.txt)" if ext == "md" else "Texto Puro (*.txt);;Markdown (*.md)"
+        sugerido = f"Relatorio_{self.track}_{self.car}_V{self.rec.lap_number}_{self.rec.lap_time_str}.{ext}"
+        sugerido = sugerido.replace(":", "-").replace(" ", "_")
+
+        path, _ = QFileDialog.getSaveFileName(self, "Salvar Relatório de Desempenho", sugerido, filt)
+        if not path:
+            return
+
+        ref_rec = self.combo_ref.currentData()
+        target_fmt = "txt" if path.lower().endswith(".txt") else "md"
+        if self.library.export_report(self.track, self.car, self.rec, path, ref_rec=ref_rec, format=target_fmt):
+            self.lbl_msg.setText(f"✓ Relatório salvo em: {os.path.basename(path)}")
+        else:
+            self.lbl_msg.setText("Falha ao salvar relatório.")
 
 
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    
-    if MOCK_MODE:
-        provider = MockTelemetryProvider()
-    else:
-        provider = AssettoCorsaTelemetryProvider()
-
-    engine = TelemetryEngine(provider=provider, hz=60)
-    engine.start()
-
-    window = TrackMapWindow(engine)
+    # Retenção desligada de propósito: esta tela só lê. Apagar volta aqui é
+    # sempre decisão explícita, pelo botão APAGAR.
+    library = LapLibrary(retention=RetentionPolicy(enabled=False))
+    window = LapAnalysisWindow(library)
     window.show()
-    
-    exit_code = app.exec_()
-    engine.stop()
-    sys.exit(exit_code)
+    sys.exit(app.exec_())
+
 
 if __name__ == "__main__":
     main()

@@ -42,6 +42,8 @@ def check(name, fn):
         fn()
         results.append((name, True, ""))
     except Exception:
+        if os.environ.get("SMOKE_VERBOSE"):
+            traceback.print_exc()
         results.append((name, False, traceback.format_exc(limit=4).strip().splitlines()[-1]))
 
 
@@ -54,6 +56,35 @@ old_cwd = os.getcwd()
 try:
     # Roda num diretório temporário para não tocar nos ghosts reais
     os.chdir(work)
+
+    # `get_base_dir()` resolve pelo __file__, não pelo diretório de trabalho:
+    # sem redirecioná-lo o teste gravaria voltas no telemetry_data/ e um
+    # config.json de verdade no repositório — e as voltas de uma execução
+    # vazariam para a seguinte, fazendo o resultado depender do histórico.
+    # Cada `from ... import` criou um nome próprio, então todos são apontados.
+    import core.paths as _paths
+    import core.config as _config
+    import core.session_manager as _sm
+    import core.lap_library as _ll
+
+    _real_base = _paths.get_base_dir()
+
+    def _tmp_app_dir(subfolder):
+        # Só o que o teste ESCREVE vai para o temporário. `track_maps/` é
+        # material de leitura versionado no repositório: redirecioná-lo
+        # esconderia o mapa da pista MOCK que o teste de curvas usa.
+        root = work if subfolder == "telemetry_data" else _real_base
+        return _paths.ensure_dir(os.path.join(root, subfolder))
+
+    # `core.paths` fica intacto de propósito: `get_app_dir()` resolve
+    # `get_base_dir` pelos globais do módulo no momento da chamada, então
+    # trocá-lo lá arrastaria junto o track_maps/ de quem importou get_app_dir
+    # antes (core.corner_analysis).
+    _config.get_base_dir = lambda: work
+    _sm.get_app_dir = _tmp_app_dir
+    _ll.get_app_dir = _tmp_app_dir
+    # O AppConfig é um singleton de processo: zera para ele nascer no temporário
+    _config._shared = None
 
     app = QApplication.instance() or QApplication([])
     provider = MockTelemetryProvider()
@@ -372,21 +403,109 @@ try:
           test_corner_analysis_without_corner_map)
 
     def test_map_base_trace_best_lap():
-        win.session_manager.completed_laps.append({
-            "lap_number": 2,
-            "lap_time_str": "1:20.100",
-            "metadata": {"track": "Spa", "car": "Test Car"},
-            "telemetry": {
-                "times": [0.0, 1.0],
-                "car_x": [100.0, 200.0],
-                "car_z": [100.0, 200.0]
-            }
-        })
-        win._update_best_map_base_trace()
-        map_w = win.sidebar_panel.track_map_card.map_widget
-        assert map_w._bg_x == [100.0, 200.0]
+        # O traçado cinza sai da volta mais rápida do CATÁLOGO, não de uma
+        # telemetria embutida na lista da sessão: `completed_laps` guarda só
+        # metadados desde a biblioteca de voltas.
+        sm = win.session_manager
+        track, car = sm._track_car if sm._track_car[0] else ("Spa", "Test Car")
+        sm._track_car = (track, car)
+        sm.library.save_lap(
+            track, car,
+            telemetry={"times": [0.0, 1.0], "distance": [0.0, 3000.0],
+                       "car_x": [100.0, 200.0], "car_z": [100.0, 200.0]},
+            lap_time_str="1:20.100", sector_times_ms=[27000, 27000, 26100],
+            lap_number=2, session_id="teste", full_lap=True, valid=True)
+        # Sem traçado nos ghosts em memória, a busca cai no catálogo. Eles são
+        # devolvidos no fim: os testes seguintes contam com uma referência
+        # utilizável, e um ghost vazio esquecido aqui deixava o engenheiro
+        # sem o que comparar lá na frente.
+        ghosts = (sm.session_best_lap_ghost, sm.best_lap_ghost)
+        try:
+            sm.session_best_lap_ghost = sm._empty_ghost()
+            sm.best_lap_ghost = sm._empty_ghost()
+            win._update_best_map_base_trace()
+            map_w = win.sidebar_panel.track_map_card.map_widget
+            assert map_w._bg_x == [100.0, 200.0], map_w._bg_x
+        finally:
+            sm.session_best_lap_ghost, sm.best_lap_ghost = ghosts
 
     check("mapa cinza usa o traçado da melhor volta válida", test_map_base_trace_best_lap)
+
+    def test_reference_can_be_any_saved_lap():
+        """Escolher uma volta específica como referência, não só os 4 modos."""
+        sm = win.session_manager
+        track, car = sm._track_car
+        rec = sm.library.save_lap(
+            track, car,
+            telemetry={"times": [i * 0.5 for i in range(60)],
+                       "distance": [i * 50.0 for i in range(60)],
+                       "speed": [150.0] * 60, "gas": [1.0] * 60,
+                       "brake": [0.0] * 60, "steer": [0.0] * 60,
+                       "sector": [0] * 60, "rpm": [7000] * 60,
+                       "car_x": [float(i) for i in range(60)],
+                       "car_z": [float(i) for i in range(60)]},
+            lap_time_str="1:18.500", sector_times_ms=[26000, 26000, 26500],
+            lap_number=9, session_id="outro-dia", full_lap=True, valid=True)
+
+        win.refresh_reference_choices()
+        combo = win.ghost_selector.combo
+        idx = win.ghost_selector.index_of(win.ghost_selector.REF_LAP, rec.lap_id)
+        assert idx >= 0, "a volta gravada não entrou no seletor de referência"
+
+        combo.setCurrentIndex(idx)
+        app.processEvents()
+        assert win.ghost_selector.selection() == (win.ghost_selector.REF_LAP,
+                                                  rec.lap_id)
+        ghost = win.reference_ghost()
+        assert ghost["metadata"]["lap_time_str"] == "1:18.500", ghost["metadata"]
+        assert len(ghost["telemetry"]["times"]) == 60
+        # A escolha fica gravada para a próxima sessão
+        assert win.config.reference() == (win.ghost_selector.REF_LAP, rec.lap_id)
+
+    check("qualquer volta gravada pode virar a referência",
+          test_reference_can_be_any_saved_lap)
+
+    def test_reference_none_really_disables():
+        """'Nenhuma' agora zera o delta em vez de cair no session best."""
+        gs = win.ghost_selector
+        assert gs.set_selection(gs.REF_NONE)
+        app.processEvents()
+        assert gs.shows_ghost() is False
+        assert win.reference_ghost()["telemetry"]["times"] == []
+        # E a automática volta a encontrar uma referência sozinha
+        assert gs.set_selection(gs.REF_AUTO)
+        app.processEvents()
+
+    check("referência 'Nenhuma' desativa de verdade",
+          test_reference_none_really_disables)
+
+    def test_reference_survives_lap_list_growth():
+        """Uma volta nova não pode roubar a referência da volta escolhida."""
+        sm = win.session_manager
+        track, car = sm._track_car
+        chosen = sm.library.save_lap(
+            track, car,
+            telemetry={"times": [i * 0.5 for i in range(40)],
+                       "distance": [i * 75.0 for i in range(40)]},
+            lap_time_str="1:19.000", sector_times_ms=[0, 0, 0], lap_number=11,
+            session_id="outro-dia", full_lap=True, valid=True)
+        win.refresh_reference_choices()
+        gs = win.ghost_selector
+        assert gs.set_selection(gs.REF_LAP, chosen.lap_id)
+
+        # Chega mais uma volta: a lista é refeita e todos os itens se movem
+        sm.library.save_lap(
+            track, car,
+            telemetry={"times": [i * 0.5 for i in range(40)],
+                       "distance": [i * 75.0 for i in range(40)]},
+            lap_time_str="1:21.000", sector_times_ms=[0, 0, 0], lap_number=12,
+            session_id="outro-dia", full_lap=True, valid=True)
+        win.refresh_reference_choices()
+        assert gs.selection() == (gs.REF_LAP, chosen.lap_id), gs.selection()
+        gs.set_selection(gs.REF_AUTO)
+
+    check("a referência acompanha a volta, não a posição na lista",
+          test_reference_survives_lap_list_growth)
 
     def test_abs_and_electronics_status():
         st = provider.get_state()
@@ -406,6 +525,57 @@ try:
 
     check("ABS e TC com destaque nas curvas e eletrônica 1/0", test_abs_and_electronics_status)
 
+    def test_live_coach_is_wired():
+        """
+        O coach de curva chega ao painel PELA interface, não só no teste dele.
+
+        Cobre a ligação: mapa de curvas -> coach -> painel do engenheiro. Já
+        houve regressão exatamente aqui — o coach funcionando sozinho e nunca
+        chamado pela janela.
+        """
+        from core.live_coach import CornerProfile
+        painel = win.engineer_panel
+        painel.combo_mode.setCurrentIndex(EngineerPanel.MODE_LIVE)
+        app.processEvents()
+
+        win._refresh_corner_map()
+        assert win._corners, "sem curvas, o coach não tem o que treinar"
+
+        # Planta um problema conhecido na primeira curva do mapa
+        curva = win._corners[0]
+        win.coach.set_track(win._corners, win._corner_track_length or 4309.0)
+        perfil = win.coach.profiles[curva.index]
+        perfil.name = curva.name or f"Curva {curva.index}"
+        perfil.samples = 4
+        perfil.avg_loss_s = 0.32
+        perfil.cause = "brake_early"
+        perfil.cause_value = 15.0
+
+        antes = painel.list_messages.count()
+        win.coach._last_spoke_at = -999.0
+        win.coach.reset_lap()
+
+        # Passa o carro pela reta que antecede a curva, em modo ao vivo
+        alvo = curva.start * (win._corner_track_length or 4309.0)
+        st = provider.get_state()
+        st.session_type = "Practice"
+        st.brake, st.gas, st.g_lat = 0.0, 1.0, 0.0
+        st.speed_kmh = 240.0
+        st.in_pit = st.in_pit_lane = False
+        for metro in range(max(0, int(alvo) - 500), int(alvo), 5):
+            st.distance_traveled = float(metro)
+            st.track_position = metro / (win._corner_track_length or 4309.0)
+            win._engineer_clock += 0.25
+            win._engineer_live_tick(st)
+        app.processEvents()
+
+        assert painel.list_messages.count() > antes,             "o coach não chegou ao painel pela interface"
+        textos = [painel.list_messages.item(i).text()
+                  for i in range(painel.list_messages.count())]
+        assert any("chegando" in t for t in textos),             f"nenhuma dica de aproximação no painel: {textos[-3:]}"
+
+    check("coach de curva ligado na interface", test_live_coach_is_wired)
+
     def test_engineer_panel():
         """
         Painel do Engenheiro: os três modos, o botão de voz e o ANALISAR.
@@ -415,16 +585,19 @@ try:
         """
         faladas = []
         prioridades = []
+        validades = []
         real_voice = win.voice
 
         class VozFalsa:
             enabled = True
-            def say(self, texto, priority=None):
+            def say(self, texto, priority=None, ttl=None):
                 faladas.append(texto)
                 prioridades.append(priority)
+                validades.append(ttl)
             def clear(self):
                 faladas.clear()
                 prioridades.clear()
+                validades.clear()
             def stop(self): pass
 
         win.voice = VozFalsa()
@@ -534,6 +707,37 @@ try:
         for w, h in ((1280, 720), (1920, 1080), (1100, 700)):
             win.resize(w, h)
             app.processEvents()
+
+    # Este vem por ÚLTIMO de propósito: começar uma sessão nova
+    # apaga o histórico da tela e o aprendizado do coach, e todo
+    # teste depois dele encontraria a janela em branco.
+    def test_new_session_resets_the_screen():
+        """
+        Treino 1 -> Treino 2 sem fechar o jogo: a tela tem que virar a página.
+
+        O catálogo em disco guarda tudo, mas o histórico DA TELA precisa
+        mostrar só a sessão em curso — senão a tabela de voltas nunca mais
+        bate com o que o piloto está fazendo agora.
+        """
+        sm = win.session_manager
+        antes_catalogo = len(sm.saved_laps())
+        idx_antes = sm.session_index
+
+        sm.start_new_session("Qualify")
+        st = provider.get_state()
+        st.session_type = "Qualify"
+        win.on_telemetry_update(st)
+        app.processEvents()
+
+        assert sm.session_index > idx_antes, "a sessão não avançou"
+        assert win._session_index_seen == sm.session_index,             "a tela não percebeu a sessão nova"
+        assert win.lap_history_table.rowCount() <= 1,             f"histórico não foi zerado: {win.lap_history_table.rowCount()} linhas"
+        assert not sm.historic_laps or len(sm.historic_laps) <= 1
+        assert len(sm.saved_laps()) == antes_catalogo,             "a sessão nova não pode mexer no catálogo em disco"
+        assert not win.coach.problem_corners(),             "o coach devia recomeçar o aprendizado na sessão nova"
+
+    check("sessão nova zera a tela e preserva o catálogo",
+          test_new_session_resets_the_screen)
 
     check("redimensionar a janela", redimensionar)
 

@@ -86,18 +86,30 @@ KOKORO_SPEED = float(os.environ.get("APEXVIEW_KOKORO_SPEED", "1.05"))
 class _Utterance:
     """Uma frase esperando a vez."""
 
-    __slots__ = ("text", "priority", "seq", "created_at")
+    __slots__ = ("text", "priority", "seq", "created_at", "ttl")
 
-    def __init__(self, text: str, priority: int, seq: int, created_at: float):
+    def __init__(self, text: str, priority: int, seq: int, created_at: float,
+                 ttl: float = None):
         self.text = text
         self.priority = priority
         self.seq = seq
         self.created_at = created_at
+        #: Validade PRÓPRIA deste recado, em segundos. Sem ela vale MAX_AGE_S.
+        self.ttl = ttl
 
     def is_stale(self, now: float) -> bool:
-        """Crítico nunca vence; o resto perde a validade."""
+        """
+        Crítico nunca vence; o resto perde a validade.
+
+        A validade padrão serve para recado de contexto ("asfalto esquentando"),
+        que continua verdadeiro por um bom tempo. Recado com hora marcada traz
+        a sua: uma dica de "Ferradura chegando" vale os três segundos até a
+        freada — dita dez segundos depois, ela chega em cima de OUTRA curva e
+        manda o piloto frear no lugar errado.
+        """
+        limite = self.ttl if self.ttl is not None else MAX_AGE_S
         return (self.priority > PRIORITY_CRITICAL
-                and (now - self.created_at) > MAX_AGE_S)
+                and (now - self.created_at) > limite)
 
 
 class _SpeechQueue:
@@ -116,7 +128,7 @@ class _SpeechQueue:
         self._closed = False
         self._seq = 0
 
-    def put(self, text: str, priority: int, now: float):
+    def put(self, text: str, priority: int, now: float, ttl: float = None):
         with self._cond:
             if self._closed:
                 return
@@ -131,11 +143,12 @@ class _SpeechQueue:
                 if priority < u.priority:
                     u.priority = priority
                     u.created_at = now
+                    u.ttl = ttl
                     self._items.sort(key=lambda x: (x.priority, x.seq))
                     self._cond.notify()
                 return
             self._seq += 1
-            self._items.append(_Utterance(text, priority, self._seq, now))
+            self._items.append(_Utterance(text, priority, self._seq, now, ttl))
             self._items.sort(key=lambda u: (u.priority, u.seq))
             while len(self._items) > self.maxsize:
                 self._items.pop(self._drop_index())
@@ -560,12 +573,19 @@ class VoiceEngine:
 
     # -- API pública ------------------------------------------------------
 
-    def say(self, text: str, priority: int = PRIORITY_NORMAL):
-        """Enfileira uma fala. Volta imediatamente."""
+    def say(self, text: str, priority: int = PRIORITY_NORMAL,
+            ttl: float = None):
+        """
+        Enfileira uma fala. Volta imediatamente.
+
+        `ttl` é a validade do recado em segundos: passado esse tempo na fila,
+        ele é descartado em vez de dito atrasado. Recado com hora marcada —
+        uma dica de curva — deve declarar a sua; sem `ttl` vale MAX_AGE_S.
+        """
         text = (text or "").strip()
         if not text or not self.enabled or self._stopping.is_set():
             return
-        self._queue.put(text, priority, time.monotonic())
+        self._queue.put(text, priority, time.monotonic(), ttl)
 
     def clear(self):
         """Esvazia o que ainda não foi falado (não corta a frase em curso)."""

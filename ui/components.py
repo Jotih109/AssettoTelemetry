@@ -623,7 +623,73 @@ class AssistsCard(BaseCard):
 
 
 class GhostSelectorCard(QWidget):
-    """Seletor da volta de referência (ghost)."""
+    """
+    Seletor da volta de referência (ghost).
+
+    Cada item carrega em `itemData` um par ``(kind, lap_id)`` que diz o que
+    ele é — nunca a posição dele na lista. A versão anterior identificava a
+    referência pelo índice do combo (0 = desativado, 1 = personal best, ...),
+    espalhado por nove pontos da janela principal: acrescentar uma opção
+    quebrava tudo em silêncio, e não havia como apontar para "aquela volta ali".
+
+    Modos fixos, e abaixo deles QUALQUER volta gravada:
+
+      auto     — a melhor referência disponível (session best, senão PB)
+      none     — nenhuma: sem ghost e sem delta
+      pb       — Personal Best (a volta mais rápida do catálogo)
+      session  — melhor volta desta sessão
+      ideal    — volta ideal teórica (melhores setores costurados)
+      lap      — uma volta específica, identificada por `lap_id`
+    """
+
+    REF_AUTO = "auto"
+    REF_NONE = "none"
+    REF_PB = "pb"
+    REF_SESSION = "session"
+    REF_IDEAL = "ideal"
+    REF_LAP = "lap"
+
+    #: Separador entre o tipo e o id da volta dentro do descritor. Nem os
+    #: nomes dos modos nem os ids de volta (limitados a [A-Za-z0-9_.-] em
+    #: core/lap_library.py) contêm dois-pontos, então a divisão é sempre exata.
+    _SEP = ":"
+
+    @classmethod
+    def descriptor(cls, kind, lap_id=""):
+        """
+        Descritor gravado em `itemData`, sempre TEXTO.
+
+        Guardar a tupla `(kind, lap_id)` direto não funciona: o PyQt embrulha
+        objetos Python arbitrários num QVariant que o `findData` compara por
+        IDENTIDADE, não por valor. Procurar por uma tupla recém-construída
+        devolvia -1 mesmo com o item na lista — e a referência salva no
+        config.json nunca era reencontrada ao voltar para a pista.
+        """
+        return f"{kind}{cls._SEP}{lap_id if kind == cls.REF_LAP else ''}"
+
+    @classmethod
+    def parse_descriptor(cls, data):
+        """Descritor -> `(kind, lap_id)`. Item sem descritor cai em 'auto'."""
+        if not isinstance(data, str) or cls._SEP not in data:
+            return (cls.REF_AUTO, "")
+        kind, lap_id = data.split(cls._SEP, 1)
+        return (kind, lap_id)
+
+    #: Modos fixos, na ordem em que aparecem
+    FIXED_MODES = (
+        (REF_AUTO, "Automática",
+         "Usa a melhor referência disponível: a melhor volta desta sessão e, "
+         "na falta dela, o Personal Best."),
+        (REF_PB, "Personal Best",
+         "A volta mais rápida já gravada para esta pista e este carro."),
+        (REF_SESSION, "Melhor da sessão",
+         "A melhor volta limpa e inteira feita desde que o app abriu."),
+        (REF_IDEAL, "Volta ideal (teórica)",
+         "Os seus melhores S1, S2 e S3 costurados numa volta só."),
+        (REF_NONE, "Nenhuma",
+         "Sem referência: os gráficos ficam sem ghost e o delta fica em zero."),
+    )
+
     def __init__(self):
         super(GhostSelectorCard, self).__init__()
         layout = QHBoxLayout(self)
@@ -636,6 +702,9 @@ class GhostSelectorCard(QWidget):
 
         self.combo = QComboBox()
         self.combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        # Com voltas de outras sessões a lista fica comprida; sem isto o Qt
+        # abre um popup do tamanho da tela em vez de rolar.
+        self.combo.setMaxVisibleItems(18)
         self.combo.setStyleSheet(f"""
             QComboBox {{
                 background-color: {T.BG_INSET};
@@ -657,11 +726,132 @@ class GhostSelectorCard(QWidget):
                 font-size: 14px;
                 outline: none;
             }}
+            QComboBox QAbstractItemView::separator {{
+                height: 1px;
+                background: {T.BORDER};
+                margin: 4px 6px;
+            }}
         """)
-        self.combo.addItems(["Desativado", "Personal Best", "Sessão Atual", "Volta Ideal"])
+
+        self._build_fixed_items()
 
         layout.addWidget(lbl_title, alignment=Qt.AlignVCenter)
         layout.addWidget(self.combo, alignment=Qt.AlignVCenter)
+
+    # -- construção da lista -------------------------------------------------
+
+    def _build_fixed_items(self):
+        for kind, text, tip in self.FIXED_MODES:
+            self.combo.addItem(text, self.descriptor(kind))
+            self.combo.setItemData(self.combo.count() - 1, tip, Qt.ToolTipRole)
+
+    def _add_header(self, text):
+        """Cabeçalho de grupo: aparece na lista, mas não é selecionável."""
+        self.combo.insertSeparator(self.combo.count())
+        self.combo.addItem(text, None)
+        idx = self.combo.count() - 1
+        item_model = self.combo.model()
+        item_model.item(idx).setEnabled(False)
+        item_model.item(idx).setForeground(QColor(T.TXT_TITLE))
+
+    def populate(self, session_laps=None, saved_laps=None):
+        """
+        Refaz a lista mantendo o que estava selecionado.
+
+        `session_laps`: itens de `SessionManager.completed_laps` (mais recente
+        primeiro na exibição). `saved_laps`: `LapRecord`s do catálogo que NÃO
+        são desta sessão — as voltas de outros dias, que é o que permite
+        comparar setup de hoje com o de semana passada.
+
+        A seleção é restaurada pelo descritor, não pela posição: uma volta
+        nova empurra a lista para baixo, e a referência tem que continuar
+        sendo a mesma volta.
+        """
+        previous = self.selection()
+        self.combo.blockSignals(True)
+        self.combo.clear()
+        self._build_fixed_items()
+
+        for entry in (session_laps or []):
+            record = entry.get("record") if isinstance(entry, dict) else entry
+            if record is None or not record.is_reference_material:
+                # Volta parcial ou sem tempo não serve de referência: o delta
+                # é medido interpolando o tempo do ghost NA MESMA DISTÂNCIA, e
+                # não há o que comparar no trecho que falta.
+                continue
+            if self.index_of(self.REF_LAP, record.lap_id) >= 0:
+                continue
+            if self.combo.count() == len(self.FIXED_MODES):
+                self._add_header("— Voltas desta sessão —")
+            self.combo.addItem(record.label(with_date=False),
+                               self.descriptor(self.REF_LAP, record.lap_id))
+            self._describe_last(record)
+
+        first_saved = True
+        for record in (saved_laps or []):
+            if not record.is_reference_material:
+                continue
+            if self.index_of(self.REF_LAP, record.lap_id) >= 0:
+                continue
+            if first_saved:
+                self._add_header("— Voltas gravadas —")
+                first_saved = False
+            self.combo.addItem(record.label(),
+                               self.descriptor(self.REF_LAP, record.lap_id))
+            self._describe_last(record)
+
+        self.combo.blockSignals(False)
+        # Se a volta que era referência saiu da lista (retenção, arquivo
+        # apagado), cai na automática em vez de ficar apontando para o vazio.
+        if not self.set_selection(*previous):
+            self.set_selection(self.REF_AUTO)
+            return False
+        return True
+
+    def _describe_last(self, record):
+        """Tooltip da última volta adicionada: setores, pontos e avisos."""
+        idx = self.combo.count() - 1
+        s1, s2, s3 = (record.sector_times_ms + [0, 0, 0])[:3]
+
+        def fmt(ms):
+            return f"{ms / 1000.0:.3f}s" if ms > 0 else "--"
+
+        tip = [f"Volta {record.lap_number} — {record.lap_time_str}"]
+        if record.date_str:
+            tip.append(f"Gravada em {record.date_str}")
+        tip.append(f"S1 {fmt(s1)}   S2 {fmt(s2)}   S3 {fmt(s3)}")
+        tip.append(f"{record.points} pontos de telemetria")
+        if not record.valid:
+            tip.append("⚠ Volta suja (corte de pista ou penalidade)")
+        if "gear" not in record.channels:
+            tip.append("Sem canal de marcha: o engenheiro não comenta marcha")
+        self.combo.setItemData(idx, "\n".join(tip), Qt.ToolTipRole)
+
+    # -- seleção -------------------------------------------------------------
+
+    def selection(self):
+        """`(kind, lap_id)` do item selecionado."""
+        return self.parse_descriptor(self.combo.itemData(self.combo.currentIndex()))
+
+    def index_of(self, kind, lap_id=""):
+        """Posição de um modo ou volta na lista (-1 se não está lá)."""
+        return self.combo.findData(self.descriptor(kind, lap_id))
+
+    def set_selection(self, kind, lap_id=""):
+        """
+        Seleciona um modo ou uma volta. Devolve False se ela não está na lista
+        (e nada é alterado).
+        """
+        idx = self.index_of(kind, lap_id)
+        if idx < 0:
+            return False
+        if idx != self.combo.currentIndex():
+            self.combo.setCurrentIndex(idx)
+        return True
+
+    def shows_ghost(self):
+        """A referência selecionada deve desenhar curvas fantasma?"""
+        return self.selection()[0] != self.REF_NONE
 
 
 class LapSelectorCard(QWidget):

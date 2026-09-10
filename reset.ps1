@@ -19,3 +19,6 @@ if ($ac) {
 Write-Host ""
 Write-Host "  Iniciando main.pyw..." -ForegroundColor Cyan
 py .\main.pyw
+
+
+#nada nda nda

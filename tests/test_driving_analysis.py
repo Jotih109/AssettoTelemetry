@@ -431,6 +431,167 @@ def test_canais_vazios_nao_quebram():
     return "todas as medidas devolvem None"
 
 
+# ---------------------------------------------------------------------------
+# Freadas medidas UMA POR UMA — a base da localização dos recados
+# ---------------------------------------------------------------------------
+
+def _volta_de_freadas(freadas, n=900, length=6000.0):
+    """
+    Volta com freadas em metragens escolhidas.
+
+    `freadas` é uma lista de (inicio_m, fim_m, pressao, repisa_para). Quando
+    `repisa_para` não é None, o pedal solta até esse valor no meio da freada e
+    volta à pressão cheia — a repisada.
+    """
+    dist = [i * (length / n) for i in range(n)]
+    brake = [0.0] * n
+    absi = [0.0] * n
+    for inicio, fim, pressao, repisa in freadas:
+        idx = [i for i, d in enumerate(dist) if inicio <= d < fim]
+        for k, i in enumerate(idx):
+            brake[i] = pressao
+        if repisa is not None and len(idx) >= 6:
+            meio = len(idx) // 2
+            brake[idx[meio]] = repisa           # soltou
+            brake[idx[meio + 1]] = pressao      # e repisou
+    return {
+        "times": [i * 0.05 for i in range(n)],
+        "distance": dist,
+        "speed": [180.0] * n,
+        "gas": [0.0 if b > 0 else 1.0 for b in brake],
+        "brake": brake,
+        "abs_intervention": absi,
+        "tc_intervention": [0.0] * n,
+    }
+
+
+def test_freadas_separadas_com_metragem():
+    """Cada freada é uma zona, com onde começou e onde acabou."""
+    tel = _volta_de_freadas([(1000.0, 1200.0, 0.9, None),
+                             (3000.0, 3200.0, 0.8, None)])
+    zonas = da.brake_zones(da.LapChannels(tel))
+    assert len(zonas) == 2, f"{len(zonas)} zonas"
+    assert abs(zonas[0].start_m - 1000.0) < 15, zonas[0].start_m
+    assert abs(zonas[1].start_m - 3000.0) < 15, zonas[1].start_m
+    assert abs(zonas[0].peak_brake - 0.9) < 1e-6
+    return f"{len(zonas)} freadas, a 1ª em {zonas[0].start_m:.0f} m"
+
+
+def test_gravidade_da_repisada_e_medida_nao_booleana():
+    """
+    Entre duas repisadas, a PIOR é a mais profunda — não a primeira da lista.
+
+    Este era o defeito: `jitter` era só um booleano, o desempate caía na
+    pressão de pico (igual em todas as freadas) e o recado apontava uma curva
+    arbitrária. Apontar a curva errada é pior que não apontar nenhuma.
+    """
+    tel = _volta_de_freadas([
+        (1000.0, 1200.0, 0.9, 0.70),    # repisada rasa (subiu 0.20)
+        (2000.0, 2200.0, 0.9, 0.30),    # repisada FUNDA (subiu 0.60)
+        (3000.0, 3200.0, 0.9, 0.75),    # rasa
+        (4000.0, 4200.0, 0.9, 0.72),    # rasa
+    ])
+    zonas = da.brake_zones(da.LapChannels(tel))
+    assert all(z.jitter for z in zonas), "todas deviam acusar repisada"
+    pior = da.worst_zone(zonas, "jitter")
+    assert abs(pior.start_m - 2000.0) < 20, \
+        f"apontou a freada de {pior.start_m:.0f} m, não a de 2000 m"
+    ordem = [round(z.start_m) for z in da.rank_zones(zonas, "jitter")]
+    assert ordem[0] == round(pior.start_m)
+    return f"pior repisada em {pior.start_m:.0f} m (fundo {pior.jitter_depth:.2f})"
+
+
+def test_gravidade_da_soltura_seca_e_o_tempo():
+    """Na soltura seca, pior é a MAIS RÁPIDA — quanto menor o tempo, pior."""
+    n, length = 900, 6000.0
+    dist = [i * (length / n) for i in range(n)]
+    times = [i * 0.05 for i in range(n)]
+    brake = [0.0] * n
+    # Freada A: solta em rampa de 4 amostras (0.20 s). Freada B: de uma vez.
+    for i, d in enumerate(dist):
+        if 1000.0 <= d < 1200.0:
+            brake[i] = 0.9
+        elif 3000.0 <= d < 3200.0:
+            brake[i] = 0.9
+    idx_a = [i for i, d in enumerate(dist) if 1000.0 <= d < 1200.0]
+    for k, i in enumerate(idx_a[-4:]):
+        brake[i] = 0.9 - 0.2 * (k + 1)          # 0.7, 0.5, 0.3, 0.1
+    tel = {"times": times, "distance": dist, "speed": [180.0] * n,
+           "gas": [0.0 if b > 0 else 1.0 for b in brake], "brake": brake,
+           "abs_intervention": [0.0] * n, "tc_intervention": [0.0] * n}
+    zonas = da.brake_zones(da.LapChannels(tel))
+    secas = [z for z in zonas if z.abrupt]
+    assert secas, "nenhuma soltura seca detectada"
+    pior = da.worst_zone(zonas, "abrupt")
+    assert abs(pior.start_m - 3000.0) < 20, \
+        f"apontou {pior.start_m:.0f} m; a seca é a de 3000 m"
+    return f"pior soltura em {pior.start_m:.0f} m ({pior.release_s:.2f}s)"
+
+
+def test_ancora_da_freada_e_o_fim_dela():
+    """
+    A freada é localizada pelo FIM, não pelo pico.
+
+    Toda freada termina na entrada da curva que a motivou. O pico não serve de
+    âncora: numa sequência, o pico da freada para a curva seguinte cai dentro
+    da curva anterior, e o recado saía apontando a curva errada.
+    """
+    tel = _volta_de_freadas([(1000.0, 1200.0, 0.9, None)])
+    z = da.brake_zones(da.LapChannels(tel))[0]
+    assert abs(z.corner_anchor_m - z.end_m) < 1e-6
+    assert z.corner_anchor_m > z.peak_m, \
+        f"âncora {z.corner_anchor_m:.0f} deveria estar depois do pico {z.peak_m:.0f}"
+    return f"âncora em {z.corner_anchor_m:.0f} m, pico em {z.peak_m:.0f} m"
+
+
+def test_resumo_da_volta_bate_com_as_zonas():
+    """
+    O resumo por volta e a lista de zonas saem da mesma varredura.
+
+    Se divergissem, o painel poderia dizer "repisada em 2 das 4 freadas" e a
+    voz falar de uma terceira.
+    """
+    tel = _volta_de_freadas([
+        (1000.0, 1200.0, 0.9, 0.40),
+        (2000.0, 2200.0, 0.9, None),
+        (3000.0, 3200.0, 0.9, 0.35),
+        (4000.0, 4200.0, 0.9, None),
+    ])
+    ch = da.LapChannels(tel)
+    zonas = da.brake_zones(ch)
+    rep = da.brake_release_report(ch)
+    assert rep is not None, "4 freadas deviam bastar para a medida"
+    assert rep.zones == len(zonas), f"{rep.zones} != {len(zonas)}"
+    assert rep.jitter_zones == sum(1 for z in zonas if z.jitter)
+    return f"{rep.zones} freadas, {rep.jitter_zones} com repisada"
+
+
+def test_subesterco_aponta_a_curva():
+    """O subesterço identifica a curva em que o carro mais deixou de virar."""
+    import core.corner_analysis as ca_mod
+    n, length = 900, 6000.0
+    dist = [i * (length / n) for i in range(n)]
+    steer = [0.0] * n
+    glat = [0.0] * n
+    for i, d in enumerate(dist):
+        if 1000.0 <= d < 1300.0:        # curva 1: vira e o carro acompanha
+            steer[i], glat[i] = 100.0, 2.0
+        elif 3000.0 <= d < 3300.0:      # curva 2: vira e o carro NÃO vira
+            steer[i], glat[i] = 100.0, 0.5
+    tel = {"times": [i * 0.05 for i in range(n)], "distance": dist,
+           "speed": [120.0] * n, "gas": [1.0] * n, "brake": [0.0] * n,
+           "steer": steer, "g_lat": glat}
+    ch = da.LapChannels(tel)
+    corners = [ca_mod.Corner(index=1, name="Boa", start=1000.0 / length,
+                             end=1300.0 / length),
+               ca_mod.Corner(index=2, name="Ruim", start=3000.0 / length,
+                             end=3300.0 / length)]
+    curva, frac = da.worst_understeer_corner(ch, corners, length)
+    assert curva is not None and curva.index == 2, curva
+    assert frac > 0.9, frac
+    return f"pior: {curva.name} ({frac * 100:.0f}%)"
+
+
 for nome, fn in [
     ("janela por metragem", test_janela_por_metragem),
     ("janela de uma curva", test_janela_de_curva),
@@ -464,6 +625,15 @@ for nome, fn in [
     ("traçado: mesma linha dá zero", test_mesma_linha_da_zero),
     ("traçado: sem coordenadas é None", test_sem_coordenadas_e_none),
     ("canais vazios não quebram nada", test_canais_vazios_nao_quebram),
+    ("freadas separadas com metragem", test_freadas_separadas_com_metragem),
+    ("gravidade da repisada é medida, não booleana",
+     test_gravidade_da_repisada_e_medida_nao_booleana),
+    ("gravidade da soltura seca é o tempo",
+     test_gravidade_da_soltura_seca_e_o_tempo),
+    ("âncora da freada é o fim dela", test_ancora_da_freada_e_o_fim_dela),
+    ("resumo da volta bate com as zonas",
+     test_resumo_da_volta_bate_com_as_zonas),
+    ("subesterço aponta a curva", test_subesterco_aponta_a_curva),
 ]:
     check(nome, fn)
 

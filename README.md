@@ -247,11 +247,26 @@ No catálogo, cada sessão fica **agrupada e identificável**: a tela de anális
   - **Ao vivo** — avisos com o carro na pista: delta contra a referência, setor que fechou, melhor volta em jogo na reta final, roda travando, TC cortando, pneu superaquecido, bandeira, penalidade, combustível, limitador esquecido ligado, dano, última volta, asfalto esfriando, vento.
   - **Sob demanda** — nada aparece sem você clicar em **ANALISAR**.
 - **Texto e voz:** painel com histórico colorido por severidade (crítico / atenção / info) e fala pelo SAPI do Windows. O botão **VOZ** desliga a fala sem apagar o texto.
-- **Escolha automática da melhor voz:** prioriza as vozes **OneCore** do Windows 10/11 (`Microsoft Daniel` / `Microsoft Maria`), muito mais naturais que as `... Desktop` do SAPI clássico — que são as únicas que o Windows enumera por padrão. Em português na frente de qualquer outro idioma; o desempate por nome fica em `PREFERRED_VOICES`, em [core/voice.py](core/voice.py).
+- **Escolha automática da melhor voz:** prioriza as vozes **OneCore** do Windows 10/11 (`Microsoft Daniel` / `Microsoft Maria`), muito mais naturais que as `... Desktop` do SAPI clássico — que são as únicas que o Windows enumera por padrão. A ordem de peso é: idioma (português na frente de tudo — voz inglesa lendo português fica incompreensível) → geração (OneCore ganha da Desktop, que é de 2010) → **gênero** (masculina, por padrão) → nome. Os pesos ficam em `voice_score`, em [core/voice.py](core/voice.py).
+- **Frase de spotter, não parágrafo:** o recado é a ORDEM (*"Tá travando a roda na freada da Curva 9. Chega mais suave"*); o porquê (*"freada além do limite"*) vai para o detalhe, que só aparece no painel. Recado que leva nove segundos não soa calmo, soa travado — ele pausa na pontuação e não termina — e ainda estoura a validade da fila de voz, que descarta o que passa de 15 s. Encurtar o texto cortou o tempo de fala pela metade (10,5 s → 5,4 s nos três recados mais longos).
+- **Ritmo um pouco acima do natural** (`voice_rate: 2`, `voice_pitch: 0`). Uma voz sintética em ritmo neutro não soa calma, soa arrastada: falta a entonação que num humano quebraria a monotonia. O tom fica neutro porque o ajuste existia para tirar o agudo de uma voz feminina — com a voz masculina o timbre já é grave, e cada efeito a mais é uma chance a mais de soar artificial.
+- **Ajuste de ouvido** (`python ajustar_voz.pyw`), em duas abas:
+  - **VOZ** — sliders de ritmo, tom e volume, o seletor das vozes instaladas e os recados **de verdade** do engenheiro para ouvir. Cada frase aparece com o tempo que levou, e as longas vêm marcadas: metade da sensação de "voz travada" não é ritmo, é frase comprida. **Comparar ritmos** fala a mesma frase em `0 / +2 / +4`, e **Comparar tons** em `0 / -2 / -4`, em sequência.
+
+    O comparador de tons existe por um motivo específico: deslocar o tom não muda como a voz é sintetizada, o Windows **reamostra a fala já pronta**. Quanto maior o deslocamento, mais artefato — e o ouvido registra isso como "metálico" ou "eletrônico" sem saber de onde vem. A partir de `±3` a janela avisa. Para um timbre mais grave, prefira uma voz naturalmente grave a puxar esta para baixo; e a janela diz qual motor está falando, porque o SAPI tem um teto de naturalidade que nenhum slider ultrapassa (acima dele, só a voz neural).
+  - **MESA DE SOM** — um fader por assunto: dica antes da curva, veredito na saída, curvas no fim da volta, pedal/volante/marcha, ABS e tração, tempo e setor, carro e consumo, pista e clima, bandeiras. Cada canal tem **ouvir** (fala um exemplo no volume dele) e **mudo**. Presets prontos: *só o coach de curva* e *modo corrida*.
+
+  **Salvar no config.json** grava voz + mesa. Timbre e o que interessa ouvir são gosto pessoal e mudam com o headset e com o tipo de sessão: nenhum padrão no código acerta para todo mundo.
+- **A mesa mexe só na VOZ.** Canal no zero cala a fala daquele assunto; o painel de texto continua mostrando tudo, sempre. Silenciar é escolher não ser interrompido, não escolher ficar sem o dado. O volume do canal MULTIPLICA o volume geral, então baixar o volume da sessão baixa tudo junto — e um canal audível nunca emudece por arredondamento, porque zero tem um significado só: "não fale".
+- **Recado novo nasce audível.** Uma regra que ninguém classificou cai num canal cheio em vez de ficar muda — o contrário seria um aviso que nunca fala e não deixa erro nenhum para investigar. Um teste lê as chaves direto do código-fonte e falha se alguma ficar sem canal.
+- **Você escolhe a voz:** `voice_name` no `config.json` aceita um pedaço do nome (`"Daniel"`, `"Maria"`) e vence a escolha automática. As vozes instaladas variam de máquina para máquina, então o app **lista no console** o que encontrou ao iniciar — é de lá que você tira o nome a usar.
 - **Fila de voz com prioridade:** um recado **crítico** fura a fila e **corta a frase em andamento** — "bandeira preta" não espera o balanço da volta terminar. A fala é síncrona, então duas frases nunca se atropelam.
 - **Cada recado tem validade própria:** dica de curva vale 3,5 s, veredito de saída 6 s, recado de contexto ("asfalto esquentando") 15 s. Passado esse tempo na fila ele é descartado em vez de dito atrasado — uma dica de freada falada dez segundos depois chega em cima de OUTRA curva. Recado crítico não tem validade: bandeira preta nunca vence por idade.
-- **Voz neural opcional (Kokoro):** com `kokoro-onnx` instalado e o modelo v1.0 em `telemetry_data/models/`, a síntese passa a ser neural, com cache de áudio em disco. Sem os arquivos — ou se a síntese falhar no meio da sessão — o SAPI assume sozinho.
+- **Voz neural opcional (Kokoro):** com `kokoro-onnx` instalado e o modelo v1.0 em `telemetry_data/models/`, a síntese passa a ser neural (voz masculina `pm_alex` por padrão), com cache de áudio em disco. É bem menos robótica que qualquer voz do Windows. Sem os arquivos — ou se a síntese falhar no meio da sessão — o SAPI assume sozinho.
 - **Fala em português de verdade:** o número dito usa vírgula decimal (`0,42`), senão o sintetizador lê "zero ponto quatro dois". O painel mantém o ponto, como o resto do app.
+- **A curva é chamada pelo NÚMERO:** *"Curva 7"*, não *"Ferradura"*. Nome próprio obriga o piloto a traduzir nome em lugar (*"qual era a Ferradura mesmo?"*) no exato momento em que ele precisa agir, e a numeração casa com a tabela curva a curva (`C7`) e com o número desenhado na faixa do gráfico — os três lugares passam a dizer a mesma coisa. Quando a pista tem mapeamento manual com nomes, o nome vai para o **detalhe** do recado, onde o painel tem tempo de leitura que a fala não tem. Para voltar aos nomes na fala: `corner_label_style: "nome"` no `config.json`.
+- **Todo recado diz ONDE:** *"Tá travando a roda **na freada da Curva 9**"*, *"Tá repisando o freio **na freada da Curva 6**"*, *"O carro não está virando **na entrada da Ferradura**"*. Numa volta de dois minutos, saber que algo acontece "em 40% das freadas" não diz em qual curva chegar diferente — a fração fica no painel, o lugar vai na voz. A gravidade de cada erro é **medida** (a profundidade da repisada, o tempo da soltura, o pico do ABS), não um booleano, para o recado apontar a pior freada e não uma qualquer.
+- **Sem mapa de curvas, o recado sai sem lugar** — nunca com um lugar inventado. Um lugar errado é pior que nenhum: o piloto passa a volta seguinte trabalhando a curva errada.
 - **Não metralha o piloto:** cada regra tem tempo de espera próprio, há intervalo mínimo entre falas, e só o essencial vai para a voz (o crítico + a curva onde mais se perdeu). O resto fica no painel.
 - **Silêncio fora da pista:** no box, no pit lane, em replay ou com o jogo pausado o engenheiro não comenta pneu frio nem delta. Só bandeira e penalidade valem em qualquer lugar.
 - **O que ele analisa:**
@@ -283,9 +298,21 @@ No catálogo, cada sessão fica **agrupada e identificável**: a tela de anális
   - **Ponto de Retomada** — metro em que o acelerador volta a 100%.
   - **Delta da Curva ($\Delta t$)** — tempo ganho/perdido **só naquele trecho**, medido por interpolação de tempo nos limites da curva.
 - **Mapeamento por pista em JSON:** arquivos em `track_maps/`, com os limites em posição relativa (0.0–1.0) ou em metros. Veja `track_maps/README.md`.
-- **Fallback automático:** pista sem mapeamento tem as curvas detectadas por Força G lateral ($|G_{lat}| > 0.4$ g, com histerese e fusão de esses). O resultado é gravado como `*.auto.json`, então a numeração não muda de volta para volta — e você pode editar o arquivo, remover o `.auto` e ele passa a ser o mapeamento manual (que sempre vence).
-- **Voltas antigas também funcionam:** ghosts gravados antes do canal `g_lat` têm a Força G lateral reconstruída pela curvatura do traçado ($a_{lat} = v^2 \kappa$).
+- **Fallback automático, em quatro passos:** pista sem mapeamento tem as curvas achadas pela Força G lateral.
+  1. **Histerese** — o trecho abre em $|G_{lat}| > 0.4$ g e só fecha abaixo de $0.25$ g, senão uma curva de raio variável viraria três.
+  2. **Fusão** de trechos vizinhos (até 40 m de respiro), e **só para o mesmo lado**.
+  3. **Corte na troca de mão** — chicanes e esses viram curvas separadas, cada uma com a sua mão.
+  4. **Corte no vale** — numa sequência ligada o G alivia entre os ápices sem chegar a zero; esse alívio é a fronteira.
+
+  Os passos 3 e 4 existem porque os dois primeiros, sozinhos, entregavam a pista inteira como três curvas gigantes.
+- **O mapa sai de VÁRIAS voltas limpas, não de uma:** volta com corte de pista nunca semeia o mapa (antes semeava — e como o arquivo fica em disco, a geometria do corte valia para sempre; pior, a volta usada era tipicamente a primeira numa pista nova, justo a mais propensa a abrir demais). Cada volta limpa vota, e uma curva só entra se a **maioria** confirmar: um corte aparece numa volta e é rejeitado; uma curva de verdade que você cortou numa volta continua no mapa pelo voto das outras. O mapa já serve na primeira volta limpa e vai se refazendo até fechar três — a aba mostra **PARCIAL** enquanto isso.
+- **Correção de detector chega em quem já usou o app:** o arquivo guarda a versão do detector e de quantas voltas saiu. Mapa de uma versão antiga, ou de menos voltas que o consenso pede, é refeito sozinho. Mapa **manual nunca é tocado** — foi você que escreveu.
+
+  O resultado é gravado como `*.auto.json`, então a numeração não muda de volta para volta — e você pode editar o arquivo (inclusive **trocar `"Curva 9"` por `"Signes"`**), remover o `.auto` do nome, e ele passa a ser o mapeamento manual, que sempre vence e nunca é refeito.
+- **Voltas antigas também funcionam:** ghosts gravados antes do canal `g_lat` têm a Força G lateral reconstruída pela curvatura do traçado ($a_{lat} = v^2 \kappa$). A curvatura é medida sobre uma base de 12 m, não entre amostras vizinhas: a 60 Hz duas amostras ficam a menos de meio metro, as coordenadas são gravadas ao centímetro, e nessa escala o ruído de arredondamento domina a conta — o $|G|$ reconstruído chegava a 6,8 g numa volta cujo pico real era 2,6 g, e a pista inteira aparecia acima do limiar de curva.
 - **Destaque nos gráficos:** botão **CURVAS** sombreia os limites de cada curva nos quatro gráficos da pilha, numerados no gráfico de velocidade.
+- **As faixas caem sobre a volta DESENHADA:** o eixo X dos gráficos é tempo e os limites de curva são distância, e a conversão de um para o outro só vale para a volta de onde o mapa de tempo saiu. Ao vivo o gráfico mostra a volta **em andamento**, então é o mapa de tempo dela que posiciona as faixas — e elas acompanham o carro em vez de ficarem onde a volta anterior as deixou. Antes as faixas usavam a última volta **fechada** e só eram recalculadas no fim da volta: o erro crescia ao longo da volta (mais de 1 s na penúltima curva com 1,3 s de diferença entre as duas voltas, e dezenas de segundos se a anterior tinha sido de saída de box), então o número da curva ficava sobre o trecho errado do gráfico.
+- **A aba diz qual volta a tabela mede:** ao vivo os dois números vêm de voltas diferentes — as faixas sombreiam a volta em andamento, a tabela mede a última fechada (não dá para cronometrar uma curva que o carro ainda não terminou). O título da aba mostra o tempo da volta analisada para os dois não serem confundidos.
 
 ---
 
@@ -522,6 +549,14 @@ O arquivo nasce sozinho com os padrões, na raiz do app. Dá para editar à mão
 | `reference_kind` | `"auto"` | Referência selecionada: `auto`, `none`, `pb`, `session`, `ideal` ou `lap`. |
 | `reference_lap_id` | `""` | Com `reference_kind: "lap"`, qual volta do catálogo usar. |
 | `voice_enabled` | `true` | A voz do engenheiro começa ligada. |
+| `voice_name` | `""` | Pedaço do nome da voz do Windows a usar (`"Daniel"`, `"Maria"`). Vazio = escolha automática. As vozes disponíveis são listadas no console ao iniciar. |
+| `voice_rate` | `2` | Velocidade da fala, `-10` (lenta) a `+10` (rápida). Ajuste de ouvido com `python ajustar_voz.pyw`. |
+| `voice_pitch` | `0` | Tom da voz, `-10` (grave) a `+10` (agudo). |
+| `voice_volume` | `100` | Volume da fala, 0 a 100. |
+| `voice_backend` | `"auto"` | `auto` (neural se houver, senão Windows), `kokoro` ou `sapi`. |
+| `voice_prefer_male` | `true` | Preferir voz masculina quando houver uma no idioma certo. |
+| `voice_mix` | `{}` | Mesa de som: volume de cada assunto, `0` (mudo) a `100`. Só o que difere de 100 é gravado; canal ausente vale cheio. Ajuste em `ajustar_voz.pyw`. |
+| `corner_label_style` | `"numero"` | Como as curvas são chamadas nos recados: `numero` (`"Curva 7"`) ou `nome` (`"Ferradura"`, quando a pista tem mapeamento manual). |
 | `engineer_mode` | `"lap"` | Modo do engenheiro: `lap` (fim de volta), `live` (ao vivo) ou `manual` (só no botão). |
 | `auto_export_on_best_lap` | `true` | Salva um PNG da tela a cada novo Personal Best. |
 | `mock_mode` | `false` | Liga o simulador interno. `--mock` e `APEXVIEW_MOCK` ganham desta chave. |
@@ -556,6 +591,7 @@ AssettoCorsa-Telemetry/
 │   │   └── ldx_writer.py   # Gerador de marcas de volta e divisórias de setores em XML (.ldx)
 │   ├── motec_exporter.py   # Ponto de entrada facilitador para exportação MoTeC i2
 │   ├── voice.py            # Voz do engenheiro: fila com prioridade, SAPI/Kokoro
+│   ├── voice_mix.py        # Mesa de som: volume por assunto do engenheiro
 │   ├── session_manager.py  # Gerenciamento de voltas, setores, ghosts e consumo
 │   ├── lap_library.py      # Catálogo de voltas: índice leve, compressão, retenção
 │   ├── config.py           # Preferências do usuário (config.json)
@@ -584,6 +620,7 @@ AssettoCorsa-Telemetry/
 │   ├── test_race_engineer.py          # Regras do engenheiro de pista
 │   ├── test_session_manager.py        # Persistência, ghosts, volta suja, troca de sessão
 │   ├── test_ui_smoke.py               # Fumaça da interface gráfica
+│   ├── test_voice_mix.py              # Mesa de som (classificação de assuntos e faders)
 │   └── test_voice_queue.py            # Fila de voz (prioridade, preempção, validade)
 ├── track_maps/             # Mapeamento das curvas por pista
 │   ├── README.md                      # Como escrever um mapa à mão
@@ -591,6 +628,7 @@ AssettoCorsa-Telemetry/
 │
 ├── main.pyw                # > Ponto de entrada do dashboard
 ├── mapa.pyw                # > Tela de análise pós-sessão (offline)
+├── ajustar_voz.pyw         # > Ajuste da voz: ritmo, tom e timbre, escolhidos de ouvido
 ├── test_voice.pyw          # > Bancada de voz: ouvir cada aviso sem entrar na pista
 ├── mock_game.py            # > Injeta telemetria na memória compartilhada do Windows,
 │                           #   para exercitar o provider REAL sem o jogo aberto

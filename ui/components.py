@@ -569,8 +569,10 @@ class AssistsCard(BaseCard):
 
         self.row_ffb, self.lbl_ffb_v = T.channel_row("FFB", "0", "%", value_size=13, label_size=10)
         self.body.addWidget(self.row_ffb)
-        # Alias antigo
         self.lbl_ffb = self.lbl_ffb_v
+
+        self.row_dial, self.lbl_dial_v = T.channel_row("Ajustes", "--", "", value_size=11, label_size=10)
+        self.body.addWidget(self.row_dial)
 
         # Espaçador vertical para empurrar o conteúdo para cima, alinhando ao topo
         self.body.addSpacerItem(QSpacerItem(20, 0, QSizePolicy.Minimum, QSizePolicy.Expanding))
@@ -620,6 +622,18 @@ class AssistsCard(BaseCard):
             color = T.WARN if ffb_pct > 80 else T.TXT_VALUE
             self.row_ffb.lbl_name.setText("FFB")
         self.lbl_ffb_v.setStyleSheet(f"color: {color}; background: transparent; border: none;")
+
+        tc_lvl = getattr(state, 'tc_level', 0)
+        tc_cut = getattr(state, 'tc_cut_level', 0)
+        abs_lvl = getattr(state, 'abs_level', 0)
+        eng_map = getattr(state, 'engine_map', 1)
+        if tc_lvl > 0 or abs_lvl > 0:
+            cut_str = f"/{tc_cut}" if tc_cut > 0 else ""
+            self.lbl_dial_v.setText(f"TC{tc_lvl}{cut_str} A{abs_lvl} M{eng_map}")
+            self.lbl_dial_v.setStyleSheet(f"color: {T.CH_SPEED}; background: transparent; border: none;")
+        else:
+            self.lbl_dial_v.setText("--")
+            self.lbl_dial_v.setStyleSheet(f"color: {T.TXT_VALUE}; background: transparent; border: none;")
 
 
 class GhostSelectorCard(QWidget):
@@ -1065,8 +1079,9 @@ class WeatherCard(BaseCard):
         self.row_amb, self.lbl_amb_v = T.channel_row("Ar", "--", "°C", value_size=11, label_size=10)
         self.row_trk, self.lbl_trk_v = T.channel_row("Asfalto", "--", "°C", value_size=11, label_size=10)
         self.row_grip, self.lbl_grip_v = T.channel_row("Grip", "--", "%", value_size=11, label_size=10)
+        self.row_rain, self.lbl_rain_v = T.channel_row("Chuva", "Seco", "", value_size=11, label_size=10)
         self.row_wind, self.lbl_wind_v = T.channel_row("Vento", "--", "km/h", value_size=11, label_size=10)
-        for row in (self.row_amb, self.row_trk, self.row_grip, self.row_wind):
+        for row in (self.row_amb, self.row_trk, self.row_grip, self.row_rain, self.row_wind):
             self.body.addWidget(row)
 
         self.bar_grip = QProgressBar()
@@ -1092,7 +1107,8 @@ class WeatherCard(BaseCard):
 
     def update_weather(self, ambient: float, track: float,
                        grip: float = 1.0, wind_speed: float = 0.0,
-                       wind_dir: float = 0.0):
+                       wind_dir: float = 0.0, rain: str = "",
+                       grip_status: str = ""):
         self.lbl_amb_v.setText(f"{ambient:.1f}")
         self.lbl_trk_v.setText(f"{track:.1f}")
 
@@ -1110,7 +1126,17 @@ class WeatherCard(BaseCard):
         self.bar_grip.setValue(int(grip_pct))
         self._set_grip_bar(grip_color)
 
-        # windSpeed vem em m/s no AC
+        if rain and rain != "No Rain":
+            self.lbl_rain_v.setText(rain)
+            self.lbl_rain_v.setStyleSheet(f"color: {T.CH_SPEED}; background: transparent; border: none;")
+        elif grip_status and grip_status != "Optimum":
+            self.lbl_rain_v.setText(grip_status)
+            self.lbl_rain_v.setStyleSheet(f"color: {T.WARN}; background: transparent; border: none;")
+        else:
+            self.lbl_rain_v.setText("Seco")
+            self.lbl_rain_v.setStyleSheet(f"color: {T.TXT_VALUE}; background: transparent; border: none;")
+
+        # windSpeed vem em m/s no AC/ACC
         wind_kmh = wind_speed * 3.6
         self.lbl_wind_v.setText(f"{wind_kmh:.0f} {self._wind_arrow(wind_dir)}")
         wind_color = T.CH_SPEED if wind_kmh > 5 else T.TXT_VALUE

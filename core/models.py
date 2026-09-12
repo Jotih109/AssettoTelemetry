@@ -146,8 +146,29 @@ class TelemetryState:
     suspension_travel: List[float] = dataclasses.field(default_factory=lambda: [0.0] * 4)
     brake_temp: List[float] = dataclasses.field(default_factory=lambda: [0.0] * 4)
 
-    # Temperaturas Interna / Meio / Externa da banda de rodagem — o jeito
+    # Temperaturas Interna / Meio / Externa da banda de rodagem é o jeito
     # certo de acertar câmber e pressão no AC.
     tyre_temp_inner: List[float] = dataclasses.field(default_factory=lambda: [80.0] * 4)
     tyre_temp_middle: List[float] = dataclasses.field(default_factory=lambda: [80.0] * 4)
     tyre_temp_outer: List[float] = dataclasses.field(default_factory=lambda: [80.0] * 4)
+
+    # --- Campos estendidos de telemetria (eletrônica, clima e freios) ---
+    tc_level: int = 0                  # Dial de TC selecionado no carro (ex: 1..11)
+    tc_cut_level: int = 0              # Dial de TC Cut selecionado no carro (ex: 1..11)
+    abs_level: int = 0                 # Dial de ABS selecionado no carro (ex: 1..11)
+    engine_map: int = 1                # Mapa de motor (1..N)
+    water_temp: float = 0.0            # Temperatura da água do motor (°C)
+    exhaust_temp: float = 0.0          # Temperatura do escapamento (°C)
+    brake_pressure: List[float] = dataclasses.field(default_factory=lambda: [0.0] * 4)
+    pad_life: List[float] = dataclasses.field(default_factory=lambda: [100.0] * 4)   # Vida útil da pastilha (mm ou %)
+    disc_life: List[float] = dataclasses.field(default_factory=lambda: [100.0] * 4)  # Vida útil do disco
+    rain_intensity: str = "No Rain"    # No Rain, Drizzle, Light Rain, Medium Rain, Heavy Rain, Thunderstorm
+    rain_intensity_in_10min: str = "No Rain"  # Previsão em 10 min
+    rain_intensity_in_30min: str = "No Rain"  # Previsão em 30 min
+    track_grip_status: str = "Optimum" # Green, Fast, Optimum, Greasy, Damp, Wet, Flooded
+    is_valid_lap: bool = True          # Volta válida (sem corte de pista)
+    stint_time_left: int = 0           # Segundos restantes no stint
+    stint_total_time_left: int = 0     # Segundos totais de stint restantes
+    wiper_stage: int = 0               # Nível do limpador
+    lights_stage: int = 0              # Nível dos faróis
+    rain_lights: bool = False          # Luz traseira de chuva

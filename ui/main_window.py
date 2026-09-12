@@ -108,7 +108,28 @@ class DashboardMainWindow(QMainWindow):
         self.corner_bests = CornerBestStore(self.session_manager.library)
         self._coach_seed_signature = None
         self._corner_best_cache = ({}, [])
-        self.voice = VoiceEngine(enabled=True)
+        # Como as curvas são chamadas nos recados (número, por padrão). É
+        # preferência do piloto, então mora no config; o módulo de análise
+        # guarda só o valor em uso, para não depender da configuração.
+        estilo = str(self.config.get("corner_label_style") or "")
+        if estilo in (ca.CORNER_LABEL_NUMBER, ca.CORNER_LABEL_NAME):
+            ca.label_style = estilo
+
+        # Mesa de som: o volume de cada assunto do engenheiro. Lida uma vez;
+        # a janela de ajuste (ajustar_voz.pyw) grava no config e o dashboard
+        # pega na próxima abertura.
+        self.voice_mix = self.config.voice_mix()
+
+        # Voz montada a partir das preferências: o timbre é gosto pessoal, e
+        # as vozes instaladas mudam de máquina para máquina.
+        self.voice = VoiceEngine(
+            enabled=True,
+            rate=int(self.config.get("voice_rate")),
+            pitch=int(self.config.get("voice_pitch")),
+            volume=int(self.config.get("voice_volume")),
+            backend=str(self.config.get("voice_backend") or "auto"),
+            preferred_voice=str(self.config.get("voice_name") or ""),
+            prefer_male=bool(self.config.get("voice_prefer_male")))
         self._engineer_last_lap_count = 0
         self._engineer_clock = 0.0   # segundos desde o início da sessão
         self._session_index_seen = 0
@@ -918,16 +939,26 @@ class DashboardMainWindow(QMainWindow):
     # Análise Curva a Curva (Turn-by-Turn)
     # -----------------------------------------------------------------------
 
-    def _corner_reference_trace(self) -> dict:
+    def _corner_reference_traces(self) -> list:
         """
-        Melhor volta disponível para servir de base à DETECÇÃO automática
-        de curvas: precisa de distância, de G lateral (ou do traçado X/Z, de
-        onde o G lateral é reconstruído por curvatura) e — o que mais importa —
-        de cobrir a volta INTEIRA.
+        Voltas que servem de base para DETECTAR as curvas da pista.
 
-        Detectar em cima de meia volta só encontra as curvas daquela metade:
-        foi assim que o mapa automático de Spa ficou com curvas apenas até 54%
-        da pista, e as faixas nos gráficos não bateram com a volta.
+        Três exigências, e a terceira é a que mais importa:
+
+        * **Volta inteira.** Detectar em cima de meia volta só encontra as
+          curvas daquela metade — foi assim que o mapa automático de Spa ficou
+          com curvas apenas até 54% da pista.
+        * **Canais suficientes:** distância e G lateral (ou o traçado X/Z, de
+          onde o G lateral é reconstruído por curvatura).
+        * **Volta LIMPA.** Volta com corte de pista não pode moldar o mapa: a
+          geometria do corte entra como se fosse o traçado, e como o mapa é
+          gravado em disco aquilo ficava valendo para sempre. E a volta que
+          semeava o mapa era tipicamente a primeira da sessão numa pista
+          nova — justo a mais propensa a abrir demais.
+
+        Devolve até CONSENSUS_LAPS voltas, da mais recente para a mais antiga.
+        Com várias, `build_consensus_corner_map` mantém só as curvas que a
+        maioria confirma, e um corte isolado deixa de ter voto suficiente.
         """
         length = float(getattr(self._last_state, "track_length", 0.0) or 0.0)
         sm = self.session_manager
@@ -937,26 +968,48 @@ class DashboardMainWindow(QMainWindow):
                     and (telem.get("g_lat") or len(telem.get("car_x", [])) >= 50)
                     and ca.lap_coverage(telem, length) >= 0.95)
 
-        # Os dois ghosts já estão na memória: começa por eles.
-        for ghost in (sm.session_best_lap_ghost, sm.best_lap_ghost):
-            telem = ghost.get("telemetry", {})
-            if usable(telem):
-                return telem
+        traces = []
+        vistas = set()
 
-        # Nenhum serve: procura no catálogo, da volta mais recente para a mais
-        # antiga. O índice diz quais voltas são inteiras e quais canais elas
-        # têm, então só as candidatas de verdade saem do disco — antes isto
-        # abria a telemetria de TODAS as voltas da sessão.
+        def add(telem):
+            """
+            Junta a volta, se ela servir e ainda não estiver na lista.
+
+            A identidade é uma assinatura barata (quantos pontos, e o tempo do
+            último), não o conteúdo: comparar dois dicionários de sete mil
+            amostras canal a canal para descobrir que são a mesma volta é
+            trabalho à toa — e é o caso COMUM, porque a melhor volta da sessão
+            costuma ser também o recorde pessoal.
+            """
+            if not usable(telem):
+                return len(traces) >= ca.CONSENSUS_LAPS
+            times = telem.get("times") or []
+            assinatura = (len(times), round(times[-1], 3) if times else 0.0)
+            if assinatura not in vistas:
+                vistas.add(assinatura)
+                traces.append(telem)
+            return len(traces) >= ca.CONSENSUS_LAPS
+
+        # Os dois ghosts já estão na memória e são, por construção, voltas
+        # limpas e inteiras (ver SessionManager.is_reference_material).
+        for ghost in (sm.session_best_lap_ghost, sm.best_lap_ghost):
+            if add(ghost.get("telemetry", {})):
+                return traces
+
+        # Depois o catálogo, da volta mais recente para a mais antiga. O índice
+        # diz quais voltas são inteiras, limpas e que canais elas têm, então só
+        # as candidatas de verdade saem do disco.
         for record in sm.completed_laps[::-1]:
             rec = record.get("record")
             if rec is None or not rec.full_lap or rec.points < 50:
                 continue
+            if not rec.valid or rec.pit_lap:
+                continue                        # cortou a pista, ou passou no box
             if not ("g_lat" in rec.channels or "car_x" in rec.channels):
                 continue
-            telem = sm.telemetry_for(record)
-            if usable(telem):
-                return telem
-        return {}
+            if add(sm.telemetry_for(record)):
+                break
+        return traces
 
     def _refresh_corner_map(self):
         """
@@ -977,13 +1030,30 @@ class DashboardMainWindow(QMainWindow):
         # que existe saiu de uma volta incompleta — nesse caso ele conhece só as
         # curvas de um pedaço da pista e precisa ser refeito.
         if cmap is None or cmap.is_provisional:
-            trace = self._corner_reference_trace()
-            if trace:
-                fresh = ca.build_auto_corner_map(track, trace, length)
+            traces = self._corner_reference_traces()
+            # Só vale refazer se houver MAIS voltas limpas do que as que
+            # geraram o mapa atual. Sem esta guarda, um mapa provisório de
+            # duas voltas seria redetectado no fim de toda volta cortada, sem
+            # nunca mudar de resultado.
+            se_paga = (cmap is None
+                       or cmap.detector_version < ca.DETECTOR_VERSION
+                       or cmap.coverage < 0.95
+                       or len(traces) > cmap.laps_used)
+            if traces and se_paga:
+                fresh = ca.build_consensus_corner_map(track, traces, length)
                 if fresh and fresh.corners:
                     path = ca.save_corner_map(fresh, auto=True)
-                    motivo = ("refeitas (o mapa anterior saiu de uma volta incompleta)"
-                              if cmap is not None else "detectadas automaticamente")
+                    voltas = (f"{fresh.laps_used} volta(s) limpa(s)")
+                    if cmap is None:
+                        motivo = f"detectadas automaticamente de {voltas}"
+                    elif cmap.detector_version < ca.DETECTOR_VERSION:
+                        motivo = ("refeitas (o mapa anterior era de uma versao "
+                                  f"antiga do detector) de {voltas}")
+                    elif cmap.coverage < 0.95:
+                        motivo = ("refeitas (o mapa anterior saiu de uma volta "
+                                  f"incompleta) de {voltas}")
+                    else:
+                        motivo = f"refeitas com {voltas}"
                     # ASCII de propósito: no console do Windows (cp1252) um
                     # caractere como "→" levanta UnicodeEncodeError, e este
                     # print roda dentro da atualização da telemetria
@@ -991,10 +1061,11 @@ class DashboardMainWindow(QMainWindow):
                           f"para '{track}'"
                           + (f" -> {os.path.basename(path)}" if path else ""))
                     cmap = fresh
-            elif cmap is not None:
-                print(f"[CornerAnalysis] Mapa automático de '{track}' cobre só "
-                      f"{cmap.coverage * 100:.0f}% da volta; será refeito quando "
-                      f"uma volta completa for gravada.")
+            elif cmap is not None and not traces:
+                print(f"[CornerAnalysis] Mapa automático de '{track}' saiu de "
+                      f"{cmap.laps_used} volta(s) e cobre "
+                      f"{cmap.coverage * 100:.0f}% da pista; será refeito "
+                      f"quando houver volta limpa e completa gravada.")
 
         self._corner_map = cmap
         self._corners = list(cmap.corners) if cmap else []
@@ -1009,6 +1080,8 @@ class DashboardMainWindow(QMainWindow):
         if self._corners:
             titulo = f"CURVAS ({len(self._corners)})"
             if cmap and cmap.is_provisional:
+                # "PARCIAL" avisa que o mapa ainda vai mudar: ele já serve,
+                # mas saiu de menos voltas limpas do que o consenso pede.
                 titulo += " PARCIAL"
         else:
             titulo = "CURVAS"
@@ -1131,7 +1204,7 @@ class DashboardMainWindow(QMainWindow):
             self._hide_corner_regions()
             return
 
-        lap_telemetry, _, _ = self._corner_analysis_lap()
+        lap_telemetry, lap_time_str, _ = self._corner_analysis_lap()
         if not lap_telemetry:
             self.corner_analysis_table.setRowCount(0)
             self._hide_corner_regions()
@@ -1143,9 +1216,58 @@ class DashboardMainWindow(QMainWindow):
         self._corner_comparisons = ca.compare_laps(
             lap_telemetry, ref_telemetry, self._corners, length)
         self.corner_analysis_table.update_corners(self._corner_comparisons)
-        self._update_corner_regions(lap_telemetry, length)
+        # A TABELA analisa a volta fechada; as FAIXAS têm de cair sobre a volta
+        # que está no gráfico, que ao vivo é outra.
+        self._update_corner_regions(self._plotted_lap_telemetry(), length)
+        self._label_corner_tab(lap_time_str)
+
+    def _label_corner_tab(self, lap_time_str: str = ""):
+        """
+        Diz na aba QUAL volta a tabela está analisando.
+
+        Ao vivo os dois números na tela vêm de voltas diferentes: as faixas
+        sombreiam a volta em andamento (é ela que está desenhada), e a tabela
+        mede a última volta fechada — não dá para cronometrar uma curva que o
+        carro ainda não terminou. Sem dizer isso, o piloto lê o delta da
+        tabela como se fosse da curva que está sombreada no gráfico.
+        """
+        if not self._corners:
+            return
+        titulo = f"CURVAS ({len(self._corners)})"
+        if self._corner_map and self._corner_map.is_provisional:
+            titulo += " PARCIAL"
+        if lap_time_str:
+            titulo += f" · {lap_time_str}"
+        self.analysis_tabs.setTabText(0, titulo)
+        linhas = ["Análise curva a curva: tempo no trecho e delta vs referência"]
+        if lap_time_str:
+            linhas.append(f"A tabela mede a volta {lap_time_str}.")
+        if self.is_live:
+            linhas.append("As faixas nos gráficos acompanham a volta EM "
+                          "ANDAMENTO, que é a desenhada.")
+        self.analysis_tabs.setTabToolTip(0, "\n".join(linhas))
 
     # --- Faixas sombreadas das curvas sobre os gráficos --------------------
+
+    def _plotted_lap_telemetry(self) -> dict:
+        """
+        A volta que está DESENHADA nos gráficos agora.
+
+        Não é a mesma coisa que a volta ANALISADA. O eixo X dos gráficos é
+        tempo, e os limites de curva são distância: a conversão de um para o
+        outro só vale para a volta de onde o mapa de tempo saiu.
+
+        Ao vivo, o gráfico mostra a volta EM ANDAMENTO, enquanto a tabela
+        analisa a última volta fechada. Usar o mapa de tempo da volta fechada
+        para posicionar as faixas sobre a volta em andamento desalinha tudo, e
+        o erro CRESCE ao longo da volta: com 1,3 s de diferença entre as duas,
+        a faixa da penúltima curva cai 1,1 s fora do lugar; se a volta anterior
+        foi de saída de box, são dezenas de segundos.
+        """
+        if self.is_live:
+            return self.session_manager.current_lap_data or {}
+        telemetry, _, _ = self._corner_analysis_lap()
+        return telemetry
 
     def _corner_plots(self):
         return (self.plot_delta, self.plot_speed, self.plot_pedals, self.plot_steer)
@@ -1172,6 +1294,7 @@ class DashboardMainWindow(QMainWindow):
             self._corner_regions.append((regions, label))
 
     def _hide_corner_regions(self):
+        self._corner_region_spans = {}
         for regions, label in self._corner_regions:
             for region in regions:
                 region.setVisible(False)
@@ -1199,21 +1322,38 @@ class DashboardMainWindow(QMainWindow):
         # com a curva de dados
         label_y = self._speed_y_max * 0.98
 
+        # Onde cada faixa já está, para não repintar o que não mudou. Ao vivo
+        # esta função roda a ~12 Hz, e mover quatro faixas por curva a cada
+        # quadro repinta os quatro gráficos à toa — as curvas já percorridas
+        # têm instante FIXO (o tempo em que se passou por uma distância não
+        # muda depois), então quase nada precisa mesmo ser mexido.
+        anterior = getattr(self, "_corner_region_spans", {})
+        atual = {}
+
         for i, corner in enumerate(self._corners):
             regions, label = self._corner_regions[i]
             t0 = ca.time_at_distance(lap_telemetry, corner.start_m(track_length))
             t1 = ca.time_at_distance(lap_telemetry, corner.end_m(track_length))
             if t0 is None or t1 is None or t1 <= t0:
-                for region in regions:
-                    region.setVisible(False)
-                label.setVisible(False)
+                # Curva que a volta desenhada ainda não alcançou: sem faixa.
+                # Ao vivo é o comportamento certo — a faixa aparece conforme o
+                # carro passa por ela, sempre alinhada com o que está no
+                # gráfico, em vez de sombrear um trecho que ainda não existe.
+                if anterior.get(corner.index) is not None:
+                    for region in regions:
+                        region.setVisible(False)
+                    label.setVisible(False)
                 continue
+            atual[corner.index] = (t0, t1)
+            if anterior.get(corner.index) == (t0, t1):
+                continue                        # já está no lugar
             for region in regions:
                 region.setRegion((t0, t1))
                 region.setVisible(True)
             label.setText(str(corner.index))
             label.setPos((t0 + t1) / 2.0, label_y)
             label.setVisible(True)
+        self._corner_region_spans = atual
 
         # Sobras do mapa anterior (pista com menos curvas) ficam escondidas
         for regions, label in self._corner_regions[len(self._corners):]:
@@ -1294,15 +1434,27 @@ class DashboardMainWindow(QMainWindow):
         # para a fila e são ditas em sequência
         if not self.engineer.should_speak(now):
             return
+        falou = False
         for advice in self.engineer.pick_for_voice(advices, limit=speak_limit):
+            # A mesa de som decide o volume DESTE assunto — e se ele deve ser
+            # falado. Canal no zero devolve None: a voz cala, o painel de
+            # texto acima continua mostrando o recado.
+            volume = self.voice_mix.volume_for(advice.key, master=self.voice.volume)
+            if volume is None:
+                continue
             # `spoken`, não `text`: decimal com vírgula para a fala sair natural.
             # A severidade vira prioridade na fila de voz: um recado crítico
             # corta o balanço da volta em vez de esperar a vez.
             self.voice.say(advice.spoken,
                            priority=_VOICE_PRIORITY.get(advice.severity,
                                                         PRIORITY_NORMAL),
-                           ttl=advice.ttl_s)
-        self.engineer.mark_spoken(now)
+                           ttl=advice.ttl_s, volume=volume)
+            falou = True
+        # O tempo de espera entre falas só corre quando algo foi REALMENTE
+        # dito: um bloco inteiro silenciado pela mesa não pode calar o
+        # engenheiro pelos próximos segundos.
+        if falou:
+            self.engineer.mark_spoken(now)
 
     def _reference_lap_time_str(self) -> str:
         return self.reference_ghost().get("metadata", {}).get("lap_time_str", "") or ""
@@ -1560,7 +1712,9 @@ class DashboardMainWindow(QMainWindow):
             track=state.track_temp,
             grip=state.surface_grip,
             wind_speed=state.wind_speed,
-            wind_dir=state.wind_direction
+            wind_dir=state.wind_direction,
+            rain=getattr(state, 'rain_intensity', ''),
+            grip_status=getattr(state, 'track_grip_status', ''),
         )
         self.session_card.update_session(state)
         self.assists_card.update_electronics(state)
@@ -1766,6 +1920,12 @@ class DashboardMainWindow(QMainWindow):
                 self.curve_brake.setData(curr["times"], brake_100)
                 self.curve_brake_abs.setData(curr["times"], brake_abs_100)
                 self.curve_steer.setData(curr["times"], curr.get("steer", []))
+
+                # As faixas de curva acompanham a volta em andamento. Sem
+                # isto elas ficavam onde a volta ANTERIOR as havia deixado,
+                # e o piloto lia "curva 7" sobre o trecho errado do gráfico.
+                if self._corners and self._corner_track_length:
+                    self._update_corner_regions(curr, self._corner_track_length)
 
             # Escala Y dinâmica para velocidade
             if curr["speed"]:

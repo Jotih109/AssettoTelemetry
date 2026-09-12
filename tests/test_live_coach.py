@@ -183,7 +183,10 @@ if disparos:
           f"{lead_s:.1f}s de antecedência")
     check("a dica diz o que fazer e quanto",
           "atrasa a freada" in adv.text and "20 metros" in adv.text, adv.text)
-    check("a dica identifica a curva pelo nome", "Ferradura" in adv.text, adv.text)
+    # Pelo NÚMERO, não pelo nome próprio: é o que casa com a tabela curva a
+    # curva e com o número desenhado na faixa do gráfico.
+    check("a dica identifica a curva pelo número", "Curva 1" in adv.text, adv.text)
+    check("a dica não usa o nome próprio", "Ferradura" not in adv.text, adv.text)
 
 # A antecedência em SEGUNDOS tem que ser parecida em velocidades diferentes —
 # é isso que o gatilho por tempo garante e o por distância não garantiria.
@@ -327,7 +330,7 @@ check("o veredito saiu DEPOIS da curva",
 if vereditos:
     texto = vereditos[0][1].text
     check("o veredito diz quanto e onde",
-          "Perdeu" in texto and "Ferradura" in texto, texto)
+          "Perdeu" in texto and "Curva 1" in texto, texto)
     check("o veredito fala em décimos, não em milésimos",
           "décimo" in texto, texto)
 
@@ -557,7 +560,10 @@ resumo = coach.lap_summary()
 check("o resumo soma o tempo na mesa",
       resumo is not None and "na mesa" in resumo.text, resumo.text if resumo else "")
 check("o resumo cita as curvas que mais pesam",
-      resumo is not None and "Ferradura" in resumo.text, resumo.text if resumo else "")
+      resumo is not None and "Curva 2" in resumo.text, resumo.text if resumo else "")
+check("o resumo guarda o nome próprio da curva no detalhe",
+      resumo is not None and "Ferradura" in resumo.detail,
+      resumo.detail if resumo else "")
 check("o resumo traz os números no detalhe, para o painel",
       resumo is not None and "melhor" in resumo.detail,
       resumo.detail if resumo else "")

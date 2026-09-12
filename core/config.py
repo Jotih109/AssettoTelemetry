@@ -40,6 +40,37 @@ DEFAULTS: Dict[str, Any] = {
     "voice_enabled": True,
     "engineer_mode": "lap",          # "lap" | "live" | "manual"
 
+    # --- Voz ---
+    # `voice_name` é um pedaço do nome da voz do Windows ("Daniel", "Maria").
+    # Vazio = o app escolhe a melhor que achar, preferindo uma voz masculina
+    # em português. As vozes instaladas são listadas no console ao iniciar,
+    # porque elas variam de máquina para máquina.
+    "voice_name": "",
+    # -10 (lento) a +10 (rápido). Ver core.voice.DEFAULT_RATE.
+    "voice_rate": 3,
+    # -10 (grave) a +10 (agudo). Ver core.voice.DEFAULT_PITCH.
+    "voice_pitch": -5,
+    "voice_volume": 100,
+    # "auto" (neural se houver, senão Windows) | "kokoro" | "sapi"
+    "voice_backend": "auto",
+    # Preferir voz masculina quando houver uma no idioma certo.
+    "voice_prefer_male": True,
+
+    # --- Mesa de som do engenheiro (core/voice_mix.py) ---
+    # Volume de cada assunto, de 0 (mudo) a 100. Só o que difere de 100 é
+    # gravado; canal ausente vale cheio. Ajuste em `python ajustar_voz.pyw`.
+    # Silenciar um canal cala a VOZ daquele assunto — o painel de texto
+    # continua mostrando tudo.
+    "voice_mix": {},
+
+    # --- Como as curvas são chamadas ---
+    # "numero" -> "Curva 7" (padrão). "nome" -> o nome do mapa ("Ferradura"),
+    # quando a pista tem mapeamento manual com nomes.
+    # O número é o padrão porque casa com a tabela curva a curva e com o
+    # número desenhado na faixa do gráfico: os três dizem a mesma coisa, e o
+    # piloto não precisa traduzir nome em lugar no meio de uma freada.
+    "corner_label_style": "numero",
+
     # --- Exportação ---
     "auto_export_on_best_lap": True,
 
@@ -196,6 +227,14 @@ class AppConfig:
     def engineer_mode(self) -> str:
         mode = self.get("engineer_mode")
         return mode if mode in ENGINEER_MODES else "lap"
+
+    def voice_mix(self):
+        """A mesa de som montada a partir das preferências."""
+        from core.voice_mix import VoiceMix
+        return VoiceMix.from_dict(self.get("voice_mix"))
+
+    def set_voice_mix(self, mix) -> bool:
+        return self.set("voice_mix", mix.to_dict())
 
     def retention_policy(self):
         """RetentionPolicy montada a partir das preferências."""

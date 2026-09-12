@@ -5,10 +5,13 @@ pyqtgraph>=0.13.7
 # Sem isto o app funciona igual: o painel de texto continua, só não fala.
 pywin32>=306; sys_platform == 'win32'
 
-# Opcional — voz neural (Kokoro), no lugar do SAPI. Além dos pacotes abaixo é
-# preciso baixar o modelo v1.0 para telemetry_data/models/:
+# Opcional — voz neural (Kokoro), no lugar do SAPI. É bem menos robótica que
+# qualquer voz do Windows. Além dos pacotes abaixo é preciso baixar o modelo
+# v1.0 para telemetry_data/models/:
 #   kokoro-v1.0.onnx  e  voices-v1.0.bin
 # Sem os dois arquivos o backend nem entra em cena e o SAPI assume.
 # O v0.19 NÃO serve: só tem vozes em inglês.
+# Vozes pt-BR do v1.0: pm_alex e pm_santa (masculinas), pf_dora (feminina).
+# O padrão é pm_alex; troque com APEXVIEW_KOKORO_VOICE.
 # kokoro-onnx>=0.4.0
 # numpy>=1.24

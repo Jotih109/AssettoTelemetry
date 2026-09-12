@@ -40,6 +40,7 @@ import dataclasses
 import re
 from typing import List, Optional
 
+from core import corner_analysis as ca
 from core import driving_analysis as da
 
 #: Números decimais no texto falado: em português quem lê "0.42" fala "zero
@@ -610,10 +611,15 @@ class RaceEngineer:
 
         out.extend(self._sector_advice(sector_times_ms, ref_sector_times_ms))
         out.extend(self._corner_advice(comparisons, lap, ref, track_length))
-        out.extend(self._pedal_advice(lap))
-        out.extend(self._steering_advice(lap, ref))
+        # As curvas da pista são o vocabulário do "onde": sem elas os recados
+        # de pilotagem saem sem lugar, que é exatamente o que os tornava
+        # inúteis numa volta de dois minutos.
+        corners = [c.corner for c in (comparisons or [])]
+        out.extend(self._pedal_advice(lap, corners, track_length))
+        out.extend(self._steering_advice(lap, ref, corners, track_length))
         out.extend(self._engine_advice(lap, state))
-        out.extend(self._electronics_advice(lap_telemetry or {}, comparisons))
+        out.extend(self._electronics_advice(lap_telemetry or {}, corners,
+                                            track_length, lap))
         if state is not None:
             out.extend(self._race_advice(state))
 
@@ -723,7 +729,8 @@ class RaceEngineer:
 
         out = []
         for cmp_ in perdas[:MAX_CORNER_ADVICE]:
-            nome = cmp_.corner.name or f"C{cmp_.corner.index}"
+            nome = ca.corner_label(cmp_.corner)
+            proprio = ca.corner_detail_name(cmp_.corner)
             causas, dicas, numeros = [], [], []
 
             d_vmin = cmp_.delta_v_min
@@ -772,8 +779,12 @@ class RaceEngineer:
                 texto = f"{nome}: perdeu {perda:.2f} segundos"
 
             severidade = ATTENTION if perda >= 0.15 else INFO
+            # O nome próprio da curva, quando a pista tem mapeamento com
+            # nomes, entra no DETALHE: no painel dá tempo de ler "Ferradura" e
+            # associar ao número que foi dito. Na fala ele só atrapalharia.
+            detalhe = " | ".join(([proprio] if proprio else []) + numeros)
             out.append(Advice(key=f"corner:{cmp_.corner.index}", severity=severidade,
-                              text=texto.strip(), detail=" | ".join(numeros),
+                              text=texto.strip(), detail=detalhe,
                               corner=cmp_.corner.index, kind="lap",
                               time_at_stake=perda))
 
@@ -783,7 +794,7 @@ class RaceEngineer:
                   if c.delta_time is not None and c.delta_time < -MIN_CORNER_LOSS_S]
         if ganhos:
             melhor = min(ganhos, key=lambda c: c.delta_time)
-            nome = melhor.corner.name or f"C{melhor.corner.index}"
+            nome = ca.corner_label(melhor.corner)
             motivo, numeros = self._corner_praise(melhor, lap, ref, track_length)
             out.append(Advice(
                 key=f"corner_ok:{melhor.corner.index}", severity=INFO,
@@ -872,32 +883,84 @@ class RaceEngineer:
                 numeros.append(f"traçado {desvio:.1f} m fora")
         return causas, dicas, numeros
 
+    # -- onde ------------------------------------------------------------
+
+    @staticmethod
+    def _onde(corners: list, track_length: float, meters,
+              prefixo: str = " ", fase: str = None) -> str:
+        """
+        O trecho de frase que situa um recado, ou string vazia.
+
+        Vazia quando não há mapa de curvas ou o ponto caiu numa reta longe de
+        tudo: nesse caso o recado sai SEM lugar, o que é honesto. Inventar uma
+        curva é pior que não dizer nenhuma — o piloto vai trabalhar a curva
+        errada na volta seguinte.
+
+        `fase` força a fase da frase. Os recados de PEDAL usam
+        `ca.PHASE_BRAKING`: eles falam todos de uma freada, e os limites de
+        curva detectados automaticamente são esticados pela histerese, o que
+        fazia o fim da freada cair "dentro" da curva e render "na entrada da
+        Curva 4" para um erro de pedal. "Na freada da Curva 4" é o mesmo
+        lugar dito como o piloto pensa nele.
+        """
+        if meters is None or not corners or not track_length:
+            return ""
+        corner, detectada = ca.corner_at(corners, track_length, float(meters))
+        frase = ca.where_phrase(corner, fase or detectada)
+        return f"{prefixo}{frase}" if frase else ""
+
     # -- pedais -----------------------------------------------------------
 
-    def _pedal_advice(self, lap: "da.LapChannels") -> List[Advice]:
-        """Como o freio e o acelerador foram usados na volta inteira."""
-        out = []
+    def _pedal_advice(self, lap: "da.LapChannels", corners: list = None,
+                      track_length: float = 0.0) -> List[Advice]:
+        """
+        Como o freio e o acelerador foram usados — e em QUAL freada.
 
+        Cada recado aponta a freada em que o erro foi mais forte. A fração da
+        volta continua no `detail`, porque ela é a prova de que aquilo é vício
+        e não uma freada azarada; mas o que é FALADO é o lugar, que é a única
+        parte com que o piloto consegue fazer algo na volta seguinte.
+        """
+        out = []
+        corners = corners or []
+        zonas = da.brake_zones(lap)
+
+        # --- Pé preso: freio e acelerador juntos ---
         overlap = da.brake_throttle_overlap(lap)
         if overlap is not None and overlap >= OVERLAP_FRACTION:
+            pior = self._zona_para_falar(zonas, "overlap_fraction", corners, track_length)
+            onde = self._onde(corners, track_length,
+                              pior.corner_anchor_m if pior else None,
+                              fase=ca.PHASE_BRAKING)
             out.append(Advice(
                 key="lap:overlap", severity=ATTENTION,
-                text=("Você está pisando no freio e no acelerador ao mesmo tempo. "
-                      "Solta um antes de pisar no outro"),
-                detail=f"os dois pedais em {overlap * 100:.0f}% da frenagem",
+                text=f"Freio e acelerador juntos{onde}. Solta um antes do outro",
+                detail=(f"os dois pedais em {overlap * 100:.0f}% da frenagem"
+                        + (f"; pior freada: {pior.overlap_fraction * 100:.0f}% "
+                           f"aos {pior.peak_m:.0f} m" if pior else "")),
+                corner=self._corner_index(corners, track_length,
+                                          pior.corner_anchor_m if pior else None),
                 kind="lap", time_at_stake=0.25))
 
         freio = da.brake_release_report(lap)
         if freio is None:
             return out
 
+        # --- Repisada: soltou, voltou a pisar ---
         if freio.fraction >= BRAKE_JITTER_FRACTION:
+            pior = self._zona_para_falar(zonas, "jitter", corners, track_length)
+            onde = self._onde(corners, track_length,
+                              pior.corner_anchor_m if pior else None,
+                              fase=ca.PHASE_BRAKING)
             out.append(Advice(
                 key="lap:brake_jitter", severity=ATTENTION,
-                text=("Tá soltando o freio em degraus, o carro balança na entrada. "
-                      "Alivia contínuo até o ápice"),
-                detail=(f"repisada em {freio.jitter_zones} das {freio.zones} "
-                        f"freadas da volta"),
+                text=f"Tá repisando o freio{onde}. Alivia contínuo até o ápice",
+                detail=("o carro balança na transição; "
+                        f"repisada em {freio.jitter_zones} das {freio.zones} "
+                        f"freadas da volta"
+                        + (f"; a pior aos {pior.peak_m:.0f} m" if pior else "")),
+                corner=self._corner_index(corners, track_length,
+                                          pior.corner_anchor_m if pior else None),
                 kind="lap", time_at_stake=0.2))
 
         # Largar o pedal de uma vez é erro diferente de repisar: tira carga da
@@ -905,30 +968,90 @@ class RaceEngineer:
         # girar na entrada.
         abrupto = freio.abrupt_fraction
         if abrupto is not None and abrupto >= BRAKE_ABRUPT_FRACTION:
+            pior = self._zona_para_falar(zonas, "abrupt", corners, track_length)
+            onde = self._onde(corners, track_length,
+                              pior.corner_anchor_m if pior else None,
+                              fase=ca.PHASE_BRAKING)
             out.append(Advice(
                 key="lap:brake_abrupt", severity=ATTENTION,
-                text=("Tá largando o freio de uma vez. Solta mais suave, "
-                      "aliviando até o ápice, que o carro entra girando"),
-                detail=(f"soltura seca em {freio.abrupt_zones} das {freio.zones} "
+                text=(f"Tá largando o freio de uma vez{onde}. "
+                      f"Alivia até o ápice"),
+                detail=("tira carga da dianteira quando a curva precisa dela, "
+                        "e o carro para de girar na entrada; "
+                        f"soltura seca em {freio.abrupt_zones} das {freio.zones} "
                         f"freadas (menos de "
-                        f"{da.ABRUPT_RELEASE_S:.2f}s do freio forte ao pedal solto)"),
+                        f"{da.ABRUPT_RELEASE_S:.2f}s do freio forte ao pedal solto)"
+                        + (f"; a pior aos {pior.peak_m:.0f} m em "
+                           f"{pior.release_s:.2f}s"
+                           if pior and pior.release_s is not None else "")),
+                corner=self._corner_index(corners, track_length,
+                                          pior.corner_anchor_m if pior else None),
                 kind="lap", time_at_stake=0.25))
         return out
+
+    @staticmethod
+    def _corner_index(corners: list, track_length: float, meters):
+        """Índice da curva que situa o recado, para o painel poder destacá-la."""
+        if meters is None or not corners or not track_length:
+            return None
+        corner, _ = ca.corner_at(corners, track_length, float(meters))
+        return corner.index if corner is not None else None
+
+    @staticmethod
+    def _zona_para_falar(zonas: list, attr: str, corners: list,
+                         track_length: float):
+        """
+        A freada de que o recado vai falar: a pior que dê para LOCALIZAR.
+
+        `da.worst_zone` escolhe pela gravidade, e é o critério certo. Mas
+        quando várias freadas empatam — e empatam com frequência, porque o
+        vício aparece igual em todas — a primeira da lista pode cair num
+        trecho sem curva por perto, e o recado sairia sem lugar tendo lugar
+        disponível. Entre freadas de mesma gravidade, a que tem nome ganha.
+
+        Se nenhuma for localizável, devolve a pior mesmo assim: o recado ainda
+        vale sem o lugar (é um vício real), só perde a parte acionável.
+        """
+        pior = da.worst_zone(zonas, attr)
+        if pior is None or not corners or not track_length:
+            return pior
+
+        for z in da.rank_zones(zonas, attr):
+            corner, _ = ca.corner_at(corners, track_length, z.corner_anchor_m)
+            if corner is not None:
+                return z
+        return pior
 
     # -- volante ----------------------------------------------------------
 
     def _steering_advice(self, lap: "da.LapChannels",
-                         ref: Optional["da.LapChannels"]) -> List[Advice]:
-        """Suavidade de volante e subesterço, medidos contra a referência."""
+                         ref: Optional["da.LapChannels"],
+                         corners: list = None,
+                         track_length: float = 0.0) -> List[Advice]:
+        """
+        Suavidade de volante e subesterço, medidos contra a referência.
+
+        O subesterço aponta a CURVA onde o carro mais deixou de virar. A
+        fração da volta fica no `detail`: ela prova que o problema é do
+        piloto e não da curva, mas é o nome da curva que ele leva para a
+        volta seguinte.
+        """
         out = []
+        corners = corners or []
 
         sub = da.understeer_fraction(lap)
         if sub is not None and sub >= UNDERSTEER_FRACTION:
+            curva, frac = da.worst_understeer_corner(lap, corners, track_length)
+            onde = ca.where_phrase(curva, ca.PHASE_ENTRY) if curva else ""
+            onde = f" {onde}" if onde else ""
             out.append(Advice(
                 key="lap:understeer", severity=ATTENTION,
-                text=("Volante travado sem o carro virar: você está entrando com "
-                      "ângulo demais. Abre a mão e deixa o carro girar"),
-                detail=f"subesterço em {sub * 100:.0f}% do tempo de curva",
+                text=f"O carro não está virando{onde}. Abre a mão",
+                detail=("volante travado, ângulo demais na entrada; "
+                        f"subesterço em {sub * 100:.0f}% do tempo de curva"
+                        + (f"; pior curva: {frac * 100:.0f}%"
+                           if frac is not None else "")),
+                corner=curva.index if curva is not None else None,
                 kind="lap", time_at_stake=0.3))
 
         taxa = da.steering_rate(lap)
@@ -938,8 +1061,7 @@ class RaceEngineer:
             if razao >= STEER_ROUGH_RATIO:
                 out.append(Advice(
                     key="lap:steer_rough", severity=ATTENTION,
-                    text=("Volante mais brusco que a referência. "
-                          "Suaviza a entrada que o pneu agradece"),
+                    text="Volante mais brusco que a referência. Suaviza a entrada",
                     detail=f"{taxa:.0f} contra {taxa_ref:.0f} graus por segundo",
                     kind="lap", time_at_stake=0.2))
             elif razao <= STEER_SMOOTH_RATIO and sub is not None and sub < UNDERSTEER_FRACTION:
@@ -963,9 +1085,10 @@ class RaceEngineer:
         if rep.early_fraction >= EARLY_SHIFT_FRACTION and rep.worst_early_rpm:
             out.append(Advice(
                 key="lap:shift_early", severity=ATTENTION,
-                text=(f"Trocando cedo demais, o motor cai fora da faixa. "
-                      f"Estica até perto de {int(max_rpm / 100) * 100} giros"),
-                detail=(f"{rep.early} de {rep.upshifts} trocas abaixo de "
+                text=(f"Trocando cedo demais. Estica até perto de "
+                      f"{int(max_rpm / 100) * 100} giros"),
+                detail=("o motor cai fora da faixa de potência; "
+                        f"{rep.early} de {rep.upshifts} trocas abaixo de "
                         f"{max_rpm * da.EARLY_SHIFT_FRACTION:.0f} rpm "
                         f"(pior: {rep.worst_early_rpm:.0f})"),
                 kind="lap", time_at_stake=0.2))
@@ -974,59 +1097,76 @@ class RaceEngineer:
         if rep.on_limiter / total >= LIMITER_FRACTION:
             out.append(Advice(
                 key="lap:limiter", severity=INFO,
-                text="Tá batendo no corte antes de trocar, sobe a marcha um pouco antes",
+                text="Tá batendo no corte. Sobe a marcha um pouco antes",
                 detail=f"no corte em {rep.on_limiter / total * 100:.0f}% da volta",
                 kind="lap", time_at_stake=0.1))
         return out
 
     # -- eletrônica -------------------------------------------------------
 
-    def _electronics_advice(self, lap_telemetry: dict, comparisons: list) -> List[Advice]:
-        """ABS e TC ao longo da volta: vício de pilotagem, não evento isolado."""
+    def _electronics_advice(self, lap_telemetry: dict, corners: list = None,
+                            track_length: float = 0.0,
+                            lap: "da.LapChannels" = None) -> List[Advice]:
+        """
+        ABS e TC ao longo da volta: vício de pilotagem, não evento isolado.
+
+        Os dois recados dizem em QUE freada e em QUE saída de curva o problema
+        foi pior. Antes eles procuravam a curva que CONTÉM o pico do canal, e
+        por isso quase nunca achavam nenhuma: o ABS atua na freada, que
+        acontece na reta ANTES da curva, fora dos limites dela. O resultado era
+        "o ABS atuou muito nessa volta" sem lugar nenhum — exatamente o recado
+        que não dá para usar. `corner_at` resolve isso conhecendo as fases da
+        curva (freada, entrada, ápice, saída).
+        """
         out = []
+        corners = corners or []
         abs_arr = lap_telemetry.get("abs_intervention") or []
         tc_arr = lap_telemetry.get("tc_intervention") or []
+        distances = lap_telemetry.get("distance") or []
         total = max(len(abs_arr), len(tc_arr))
         if total < 20:
             return out
 
-        def onde_pior(arr):
-            """Curva onde o canal teve o maior pico, se houver mapeamento."""
-            if not arr or not comparisons:
+        def pico_em(arr):
+            """Metragem do maior valor do canal, ou None."""
+            if not arr or len(distances) < len(arr):
                 return None
-            distances = lap_telemetry.get("distance") or []
-            if len(distances) < len(arr):
-                return None
-            pico_i = max(range(len(arr)), key=lambda i: arr[i])
-            d = distances[pico_i]
-            for cmp_ in comparisons:
-                lap_len = max(distances) or 1.0
-                if cmp_.corner.start * lap_len <= d <= cmp_.corner.end * lap_len:
-                    return cmp_.corner.name or f"C{cmp_.corner.index}"
-            return None
+            i = max(range(len(arr)), key=lambda k: arr[k])
+            return distances[i]
 
+        # --- ABS: freando além do limite, ou seja, travando a roda ---
         if abs_arr:
             forte = sum(1 for v in abs_arr if v >= ABS_LIVE_THRESHOLD)
             if forte / len(abs_arr) >= ABS_LAP_FRACTION:
-                local = onde_pior(abs_arr)
-                onde = f" O pior ponto foi em {local}." if local else ""
+                # A freada em que o ABS mais trabalhou é o lugar do recado —
+                # mais preciso que o pico do canal, porque é medida por freada.
+                zonas = da.brake_zones(lap) if lap is not None else []
+                pior = self._zona_para_falar(zonas, "abs_peak", corners, track_length)
+                metros = pior.corner_anchor_m if pior else pico_em(abs_arr)
+                onde = self._onde(corners, track_length, metros,
+                                  fase=ca.PHASE_BRAKING)
                 out.append(Advice(
                     key="lap:abs", severity=ATTENTION,
-                    text=("O ABS atuou muito nessa volta, você está freando além do limite. "
-                          "Chega mais suave ao ponto de frenagem." + onde),
-                    detail=f"ABS forte em {forte / len(abs_arr) * 100:.0f}% da volta",
+                    text=f"Tá travando a roda{onde}. Chega mais suave",
+                    detail=("freada além do limite; "
+                            f"ABS forte em {forte / len(abs_arr) * 100:.0f}% "
+                            f"da volta"
+                            + (f"; pico de {pior.abs_peak * 100:.0f}% aos "
+                               f"{pior.peak_m:.0f} m" if pior else "")),
+                    corner=self._corner_index(corners, track_length, metros),
                     kind="lap", time_at_stake=0.2))
 
+        # --- TC: gás demais na saída ---
         if tc_arr:
             forte = sum(1 for v in tc_arr if v >= TC_LIVE_THRESHOLD)
             if forte / len(tc_arr) >= TC_LAP_FRACTION:
-                local = onde_pior(tc_arr)
-                onde = f" Principalmente na saída de {local}." if local else ""
+                metros = pico_em(tc_arr)
+                onde = self._onde(corners, track_length, metros)
                 out.append(Advice(
                     key="lap:tc", severity=ATTENTION,
-                    text=("A tração cortou bastante nessa volta. "
-                          "Abre o gás mais devagar nas saídas." + onde),
+                    text=f"Tração cortando{onde}. Abre o gás mais devagar",
                     detail=f"TC forte em {forte / len(tc_arr) * 100:.0f}% da volta",
+                    corner=self._corner_index(corners, track_length, metros),
                     kind="lap", time_at_stake=0.2))
         return out
 

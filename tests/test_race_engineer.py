@@ -128,6 +128,17 @@ def por_chave(advices, prefixo):
     return [a for a in advices if a.key.startswith(prefixo)]
 
 
+def _state_com_pista(length=6000.0):
+    """State mínimo: o engenheiro só precisa do comprimento da pista daqui."""
+    class _S:
+        track_length = length
+        max_rpm = 0.0
+        total_laps = 0
+        session_type = "practice"
+    return _S()
+
+
+
 # ---------------------------------------------------------------------------
 # Diagnóstico de curva
 # ---------------------------------------------------------------------------
@@ -138,7 +149,7 @@ def test_freou_antes():
     alvo = [a for a in adv if a.corner == 1]
     assert alvo, "nenhum conselho para a curva"
     t = alvo[0].text
-    assert t.startswith("C1:"), t              # diz QUAL curva
+    assert t.startswith("Curva 1:"), t         # diz QUAL curva, pelo número
     assert "perdeu 0.30 segundos" in t, t      # quanto custou
     assert "20 metros antes" in t, t           # o que aconteceu
     assert "freada" in t, t                    # o que fazer
@@ -212,7 +223,10 @@ def test_reforco_positivo():
     ])
     bons = por_chave(adv, "corner_ok:")
     assert bons, textos(adv)
-    assert "Eau Rouge" in bons[0].text and "0.22" in bons[0].text
+    # Chamada pelo NÚMERO, não pelo nome próprio: "curva 2" o piloto localiza
+    # na hora, "Eau Rouge" ele ainda precisa traduzir.
+    assert "Curva 2" in bons[0].text and "0.22" in bons[0].text, bons[0].text
+    assert "Eau Rouge" not in bons[0].text, bons[0].text
     return bons[0].text
 
 
@@ -499,8 +513,12 @@ def test_freio_largado_de_uma_vez():
                                                         gas=[0.0] * n))
     seco = por_chave(adv, "lap:brake_abrupt")
     assert seco, textos(adv)
-    assert "solta mais suave" in seco[0].text.lower(), seco[0].text
+    # A ORDEM fica na fala; o porquê ("tira carga da dianteira") foi para o
+    # detalhe, porque uma frase de nove segundos não é recado de spotter.
+    assert "alivia até o ápice" in seco[0].text.lower(), seco[0].text
+    assert "largando o freio de uma vez" in seco[0].text.lower(), seco[0].text
     assert "4 das 4" in seco[0].detail, seco[0].detail
+    assert "dianteira" in seco[0].detail, seco[0].detail
     # E não acusa degrau, que é outro problema
     assert not por_chave(adv, "lap:brake_jitter"), textos(adv)
     return seco[0].text
@@ -536,7 +554,9 @@ def test_subesterco():
     adv = eng.analyze_lap([], lap_telemetry=lap_channels(n, steer=steer, g_lat=g_lat))
     sub = por_chave(adv, "lap:understeer")
     assert sub, textos(adv)
-    assert "ângulo demais" in sub[0].text, sub[0].text
+    assert "não está virando" in sub[0].text, sub[0].text
+    assert "Abre a mão" in sub[0].text, sub[0].text
+    assert "ângulo demais" in sub[0].detail, sub[0].detail
     return sub[0].detail
 
 
@@ -637,7 +657,10 @@ def test_abs_vicio_de_freada():
     adv = eng.analyze_lap([], lap_telemetry=telem)
     abs_adv = por_chave(adv, "lap:abs")
     assert abs_adv, textos(adv)
-    assert "ABS" in abs_adv[0].text and "freando" in abs_adv[0].text
+    # O que é FALADO é o que o piloto sente ("travando a roda"); o jargão
+    # ("ABS forte em X% da volta") fica no detalhe do painel.
+    assert "travando a roda" in abs_adv[0].text, abs_adv[0].text
+    assert "ABS" in abs_adv[0].detail, abs_adv[0].detail
     return abs_adv[0].detail
 
 
@@ -665,7 +688,8 @@ def test_tc_localiza_a_curva():
     adv = eng.analyze_lap(comps, lap_telemetry=telem)
     tc = por_chave(adv, "lap:tc")
     assert tc, textos(adv)
-    assert "Pouhon" in tc[0].text, tc[0].text
+    assert "Curva 2" in tc[0].text, tc[0].text
+    assert tc[0].corner == 2, tc[0].corner
     return tc[0].text
 
 
@@ -1032,12 +1056,12 @@ def test_escolha_do_que_falar():
 
     falados = eng.pick_for_voice(adv, limit=2)
     assert len(falados) == 2, len(falados)
-    assert any("Ferradura" in a.text for a in falados), textos(falados)
+    assert any("Curva 2" in a.text for a in falados), textos(falados)
 
     adv_crit = eng.analyze_live(state(fuel_laps_remaining=0.5), now=1.0) + adv
     falados = eng.pick_for_voice(adv_crit, limit=2)
     assert falados[0].severity == CRITICAL, falados[0].severity
-    assert any("Ferradura" in a.text for a in falados), textos(falados)
+    assert any("Curva 2" in a.text for a in falados), textos(falados)
     return textos(falados)[:90]
 
 
@@ -1171,6 +1195,177 @@ def test_combustivel_suficiente_fica_calado():
     return "autonomia suficiente: silêncio"
 
 
+# ---------------------------------------------------------------------------
+# Localização: todo recado de pilotagem tem de dizer ONDE
+# ---------------------------------------------------------------------------
+
+def _volta_com_curvas(n=600, length=6000.0, **overrides):
+    """
+    Volta longa com duas curvas mapeadas e uma freada antes de cada uma.
+
+    As curvas ficam em 2000–2300 m e 4000–4300 m; as freadas, nos 250 m que
+    antecedem cada uma — que é onde elas acontecem de verdade, e era o que o
+    localizador antigo não sabia ver.
+    """
+    dist = [i * (length / n) for i in range(n)]
+    brake = []
+    for d in dist:
+        freando = (1750.0 <= d < 2000.0) or (3750.0 <= d < 4000.0)
+        brake.append(0.9 if freando else 0.0)
+    tel = {
+        "times": [i * 0.05 for i in range(n)],
+        "distance": dist,
+        "speed": [150.0] * n,
+        "gas": [0.0 if b > 0 else 1.0 for b in brake],
+        "brake": brake,
+        "rpm": [7800.0] * n,
+        "gear": [5] * n,
+        "steer": [0.0] * n,
+        "g_lat": [0.0] * n,
+        "car_x": [float(i) for i in range(n)],
+        "car_z": [0.0] * n,
+        "abs_intervention": [0.0] * n,
+        "tc_intervention": [0.0] * n,
+    }
+    tel.update(overrides)
+    return tel
+
+
+def _curvas_mapeadas(length=6000.0):
+    """Os CornerComparison de duas curvas nomeadas, como a UI os passa."""
+    return [comparison(index=1, name="Ferradura",
+                       start=2000.0 / length, end=2300.0 / length),
+            comparison(index=2, name="Pinheirinho",
+                       start=4000.0 / length, end=4300.0 / length)]
+
+
+def test_abs_diz_em_qual_freada():
+    """
+    O recado de roda travada tem de nomear a curva.
+
+    Este era o defeito principal: o ABS atua na FREADA, que acontece na reta
+    antes da curva. O localizador antigo só reconhecia o interior da curva,
+    não achava nada, e o recado saía "o ABS atuou muito nessa volta" — sem
+    lugar, e por isso inútil numa volta de dois minutos.
+    """
+    eng = RaceEngineer()
+    n, length = 600, 6000.0
+    # ABS trabalhando na freada da SEGUNDA curva (3750–4000 m)
+    absi = []
+    for i in range(n):
+        d = i * (length / n)
+        absi.append(0.9 if 3750.0 <= d < 4000.0 else 0.0)
+    telem = _volta_com_curvas(n, length, abs_intervention=absi)
+    adv = eng.analyze_lap(_curvas_mapeadas(length), lap_telemetry=telem,
+                          state=_state_com_pista(length))
+    abs_adv = por_chave(adv, "lap:abs")
+    assert abs_adv, textos(adv)
+    texto = abs_adv[0].text
+    assert "Curva 2" in texto, texto
+    assert "freada" in texto, texto
+    assert abs_adv[0].corner == 2, abs_adv[0].corner
+    return texto
+
+
+def test_recado_sem_mapa_de_curvas_nao_inventa_lugar():
+    """
+    Sem mapa de curvas o recado sai SEM lugar — nunca com um lugar inventado.
+
+    Um lugar errado é pior que nenhum: o piloto passa a volta seguinte
+    trabalhando a curva errada.
+    """
+    eng = RaceEngineer()
+    n, length = 600, 6000.0
+    absi = [0.9 if 3750.0 <= i * (length / n) < 4000.0 else 0.0
+            for i in range(n)]
+    telem = _volta_com_curvas(n, length, abs_intervention=absi)
+    adv = eng.analyze_lap([], lap_telemetry=telem)      # sem curvas
+    abs_adv = por_chave(adv, "lap:abs")
+    assert abs_adv, textos(adv)
+    texto = abs_adv[0].text
+    assert "travando a roda" in texto, texto
+    # Nenhum nome de curva e nenhuma fase: o recado sai só com o problema.
+    # ("no ponto de freada" faz parte da instrução, não é localização.)
+    assert "freada da" not in texto and "freada do" not in texto, texto
+    assert "Curva" not in texto, texto
+    assert abs_adv[0].corner is None
+    return "recado dito sem localização inventada"
+
+
+def test_repisada_diz_em_qual_freada():
+    """A repisada de freio também aponta a freada em que foi pior."""
+    eng = RaceEngineer()
+    n, length = 600, 6000.0
+    telem = _volta_com_curvas(n, length)
+    # Repisa em TODAS as freadas: o vício existe. Precisa haver freadas
+    # suficientes para a medida valer (MIN_BRAKE_ZONES), então a volta ganha
+    # mais quatro freadas curtas.
+    dist = telem["distance"]
+    brake = list(telem["brake"])
+    for k, base in enumerate((500.0, 1000.0, 2800.0, 3200.0)):
+        for i, d in enumerate(dist):
+            if base <= d < base + 200.0:
+                brake[i] = 0.9
+    # Degrau de repisada no fim de cada freada
+    dentro = False
+    for i in range(1, len(brake)):
+        if brake[i] > 0.15 and brake[i - 1] <= 0.15:
+            dentro = True
+            passo = 0
+        if dentro and brake[i] > 0.15:
+            passo += 1
+            if passo == 8:
+                brake[i] = 0.5              # começou a soltar
+            elif passo == 9:
+                brake[i] = 0.9              # e repisou
+        if brake[i] <= 0.15:
+            dentro = False
+    telem["brake"] = brake
+    telem["gas"] = [0.0 if b > 0 else 1.0 for b in brake]
+    adv = eng.analyze_lap(_curvas_mapeadas(length), lap_telemetry=telem,
+                          state=_state_com_pista(length))
+    jit = por_chave(adv, "lap:brake_jitter")
+    assert jit, textos(adv)
+    texto = jit[0].text
+    # Entre freadas de mesma gravidade, o engenheiro fala da que tem nome:
+    # quatro das seis freadas desta volta caem em retas, e apontar uma delas
+    # devolveria um recado sem lugar tendo lugar disponível.
+    assert "Curva 1" in texto or "Curva 2" in texto, texto
+    assert jit[0].corner in (1, 2), jit[0].corner
+    return texto
+
+
+def test_nome_proprio_da_curva_vai_para_o_detalhe():
+    """
+    A fala usa o número; o nome do mapa continua visível no painel.
+
+    Chamar a curva pelo número é o que o piloto pediu — "curva 7" se localiza
+    na hora. Mas quem mapeou a pista à mão escreveu "Ferradura" por um motivo,
+    e o painel tem tempo de leitura que a fala não tem: o nome vai para o
+    detalhe, onde amarra o número ao lugar sem atrapalhar o recado.
+    """
+    eng = RaceEngineer()
+    adv = eng.analyze_lap([comparison(1, "Ferradura", delta_t=0.30,
+                                      d_brake=-20.0)])
+    alvo = [a for a in adv if a.corner == 1]
+    assert alvo, textos(adv)
+    assert "Curva 1" in alvo[0].text, alvo[0].text
+    assert "Ferradura" not in alvo[0].text, alvo[0].text
+    assert "Ferradura" in alvo[0].detail, alvo[0].detail
+    return f"fala: {alvo[0].text[:38]}... | painel: {alvo[0].detail}"
+
+
+def test_curva_sem_nome_nao_repete_o_rotulo_no_detalhe():
+    """Pista sem mapeamento manual: nada de "Curva 1 | Curva 1" no painel."""
+    eng = RaceEngineer()
+    adv = eng.analyze_lap([comparison(1, "Curva 1", delta_t=0.30,
+                                      d_brake=-20.0)])
+    alvo = [a for a in adv if a.corner == 1]
+    assert alvo, textos(adv)
+    assert not alvo[0].detail.startswith("Curva 1"), alvo[0].detail
+    return f"detalhe: {alvo[0].detail}"
+
+
 for nome, fn in [
     ("curva: freou antes", test_freou_antes),
     ("curva: entrou devagar no ápice", test_entrou_devagar),
@@ -1207,8 +1402,17 @@ for nome, fn in [
     ("motor: batendo no corte", test_batendo_no_corte),
     ("motor: sem RPM máximo não opina", test_sem_rpm_maximo_nao_opina),
     ("ABS: vício de freada na volta", test_abs_vicio_de_freada),
+    ("ABS: o recado diz em qual freada", test_abs_diz_em_qual_freada),
+    ("sem mapa de curvas não inventa lugar",
+     test_recado_sem_mapa_de_curvas_nao_inventa_lugar),
+    ("repisada: o recado diz em qual freada",
+     test_repisada_diz_em_qual_freada),
     ("ABS: travada isolada não vira vício", test_abs_pontual_nao_vira_vicio),
     ("TC: aponta a curva do pior corte", test_tc_localiza_a_curva),
+    ("nome próprio da curva vai para o detalhe",
+     test_nome_proprio_da_curva_vai_para_o_detalhe),
+    ("curva sem nome não repete o rótulo no detalhe",
+     test_curva_sem_nome_nao_repete_o_rotulo_no_detalhe),
     ("não fala de setup", test_nao_fala_de_setup),
     ("ao vivo: delta perdendo tempo", test_live_delta_perdendo),
     ("ao vivo: delta voando", test_live_delta_voando),

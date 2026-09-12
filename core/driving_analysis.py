@@ -104,6 +104,11 @@ class LapChannels:
         self.g_lat = _floats(t.get("g_lat"))
         self.car_x = _floats(t.get("car_x"))
         self.car_z = _floats(t.get("car_z"))
+        # Eletrônica: entram aqui para que a análise de cada freada possa
+        # dizer se o ABS atuou NAQUELA freada. Antes o canal só era olhado
+        # como fração da volta inteira, e o recado saía sem lugar.
+        self.abs_intervention = _floats(t.get("abs_intervention"))
+        self.tc_intervention = _floats(t.get("tc_intervention"))
 
     def __len__(self) -> int:
         return len(self.distance) or len(self.times)
@@ -210,6 +215,168 @@ class BrakeReport:
         return self.abrupt_zones / self.zones
 
 
+class BrakeZone:
+    """
+    UMA freada da volta, com onde ela aconteceu e o que houve nela.
+
+    Existe para o engenheiro poder dizer o LUGAR. As medidas por volta
+    ("repisada em 5 das 12 freadas") descrevem um vício corretamente, mas o
+    piloto não tem o que fazer com elas: numa volta de dois minutos, saber que
+    algo acontece "em 40% das freadas" não diz em qual curva chegar diferente.
+    """
+
+    __slots__ = ("start_m", "end_m", "peak_brake", "peak_m", "jitter",
+                 "jitter_depth", "abrupt", "release_s", "abs_peak", "samples",
+                 "overlap_samples", "_min_after_release")
+
+    def __init__(self, start_m: float = 0.0):
+        self.start_m = start_m          # onde o pé encostou no freio
+        self.end_m = start_m            # onde saiu
+        self.peak_brake = 0.0           # maior pressão da freada (0..1)
+        self.peak_m = start_m           # e em que metro ela aconteceu
+        self.jitter = False             # repisou depois de começar a soltar
+        #: TAMANHO da repisada (fração do curso do pedal). É o que mede a
+        #: gravidade: soltar até 60% e voltar a 85% incomoda; soltar até 35% e
+        #: voltar a 85% joga o carro. Sem esta medida, doze freadas marcadas
+        #: com o mesmo booleano empatavam e o recado apontava uma qualquer.
+        self.jitter_depth = 0.0
+        self.abrupt = False             # largou o pedal de uma vez
+        self.release_s = None           # tempo do freio forte até o pé fora
+        self.abs_peak = 0.0             # maior atuação do ABS nesta freada
+        self.samples = 0                # amostras com o freio pisado
+        self.overlap_samples = 0        # e quantas delas com o gás também
+        self._min_after_release = None  # menor pressão desde que começou a soltar
+
+    @property
+    def overlap_fraction(self) -> float:
+        """Fração desta freada em que o acelerador também estava pisado."""
+        return self.overlap_samples / self.samples if self.samples else 0.0
+
+    @property
+    def corner_anchor_m(self) -> float:
+        """
+        A metragem que diz PARA QUAL CURVA esta freada foi.
+
+        É o fim da freada, não o pico. Toda freada termina na entrada da curva
+        que a motivou, então o fim aponta essa curva com precisão. O pico não:
+        numa sequência, o pico da freada para a curva seguinte cai dentro da
+        curva anterior, e o recado saía dizendo "na saída da Curva 5" para um
+        erro que o piloto comete freando para a Curva 6.
+        """
+        return self.end_m
+
+
+def brake_zones(ch: LapChannels) -> List[BrakeZone]:
+    """
+    Separa a volta em freadas e mede cada uma delas isoladamente.
+
+    Uma freada começa quando o pedal passa de PEDAL_ON e termina quando o pé
+    sai. Os erros são marcados uma vez por freada — repisar duas vezes na
+    mesma freada é o mesmo erro, não dois.
+
+    É a base de toda a localização dos recados: cada zona carrega a sua
+    metragem, e `core/corner_analysis.corner_at` traduz metragem em nome de
+    curva.
+    """
+    if not ch.brake or not ch.distance:
+        return []
+
+    tem_tempo = bool(ch.times)
+    zonas: List[BrakeZone] = []
+    zona = None
+    soltando = False
+    minimo = 1.0
+    t_forte = None
+
+    def metro(i):
+        return ch.distance[i] if i < len(ch.distance) else 0.0
+
+    def instante(i):
+        return ch.times[i] if tem_tempo and i < len(ch.times) else None
+
+    for i, valor in enumerate(ch.brake):
+        if valor < PEDAL_ON:
+            if zona is not None:
+                zona.end_m = metro(i)
+                # Soltura seca: do freio forte ao pedal solto num piscar. Tira
+                # carga da dianteira justo quando a curva precisa dela.
+                if zona.peak_brake >= BRAKE_HARD and t_forte is not None:
+                    t_fim = instante(i)
+                    if t_fim is not None:
+                        zona.release_s = t_fim - t_forte
+                        zona.abrupt = 0 <= zona.release_s <= ABRUPT_RELEASE_S
+                zonas.append(zona)
+            zona = None
+            soltando = False
+            minimo = 1.0
+            t_forte = None
+            continue
+
+        if zona is None:
+            zona = BrakeZone(start_m=metro(i))
+            minimo = valor
+        elif valor < minimo - 0.01:
+            soltando = True
+            minimo = valor
+        elif soltando and valor > minimo + BRAKE_STEP:
+            # A profundidade é quanto o pedal SUBIU de volta a partir do
+            # ponto mais aliviado. Guarda a maior repisada da freada.
+            zona.jitter = True
+            zona.jitter_depth = max(zona.jitter_depth, valor - minimo)
+
+        if valor > zona.peak_brake:
+            zona.peak_brake = valor
+            zona.peak_m = metro(i)
+        if valor >= BRAKE_HARD:
+            t_forte = instante(i)
+        if i < len(ch.abs_intervention):
+            zona.abs_peak = max(zona.abs_peak, ch.abs_intervention[i])
+        zona.samples += 1
+        if i < len(ch.gas) and ch.gas[i] > PEDAL_ON:
+            zona.overlap_samples += 1
+        zona.end_m = metro(i)
+
+    if zona is not None:
+        zonas.append(zona)
+    return zonas
+
+
+def rank_zones(zones: List[BrakeZone], attr: str) -> List[BrakeZone]:
+    """
+    As freadas que acusam um problema, da PIOR para a menos pior.
+
+    Cada defeito tem a sua medida de gravidade, e nenhuma delas é o booleano:
+
+      * `jitter`  — o tamanho da repisada. Voltar de 60% a 85% incomoda;
+        voltar de 35% a 85% joga o carro.
+      * `abrupt`  — o tempo da soltura. Quanto MENOR, pior: 0.02 s é o pé
+        pulando fora do pedal, 0.14 s já é quase progressivo.
+      * o resto     — o próprio valor do campo (fração, pico de ABS).
+
+    Existe como função única porque duas partes do código precisam da mesma
+    ordem: quem escolhe a pior freada e quem procura a pior freada que dê
+    para localizar. Se as duas ordenassem por conta própria, o painel poderia
+    apontar uma curva e a voz dizer outra.
+    """
+    candidatas = [z for z in zones if getattr(z, attr, None)]
+    if not candidatas:
+        return []
+    if attr == "jitter":
+        # Desempate pela pressão: repisar numa freada forte custa mais.
+        return sorted(candidatas, key=lambda z: (-z.jitter_depth, -z.peak_brake))
+    if attr == "abrupt":
+        return sorted(candidatas,
+                      key=lambda z: (z.release_s if z.release_s is not None
+                                     else ABRUPT_RELEASE_S, -z.peak_brake))
+    return sorted(candidatas, key=lambda z: -float(getattr(z, attr)))
+
+
+def worst_zone(zones: List[BrakeZone], attr: str) -> Optional[BrakeZone]:
+    """A freada que mais acusa um problema — é dela que o recado fala."""
+    ordenadas = rank_zones(zones, attr)
+    return ordenadas[0] if ordenadas else None
+
+
 def brake_release_report(ch: LapChannels) -> Optional[BrakeReport]:
     """
     Como cada freada da volta terminou: com repisada, largada de uma vez, ou
@@ -225,48 +392,21 @@ def brake_release_report(ch: LapChannels) -> Optional[BrakeReport]:
     pedal levou para sair da freada forte até solto é estável mesmo com pedal
     ruidoso, e é o número que o piloto entende ("meio segundo" contra "de uma
     vez").
+
+    O resumo da volta e a lista de zonas saem da MESMA varredura
+    (`brake_zones`): o painel e a voz nunca podem discordar sobre quantas
+    freadas tiveram repisada.
     """
     if not ch.has("brake"):
         return None
 
+    zonas = brake_zones(ch)
     mede_soltura = ch.has("times")
     rep = BrakeReport(abrupt_zones=0 if mede_soltura else None)
-
-    def tempo(i):
-        return ch.times[i] if mede_soltura and i < len(ch.times) else None
-
-    freando = False
-    soltando = False
-    minimo = 1.0
-    marcada = False
-    pico = 0.0
-    t_forte = None      # último instante com o pedal ainda na freada forte
-
-    for i, valor in enumerate(ch.brake):
-        if valor < PEDAL_ON:
-            if freando and mede_soltura and pico >= BRAKE_HARD and t_forte is not None:
-                t_fim = tempo(i)
-                if t_fim is not None and 0 <= (t_fim - t_forte) <= ABRUPT_RELEASE_S:
-                    rep.abrupt_zones += 1
-            freando = soltando = marcada = False
-            minimo, pico, t_forte = 1.0, 0.0, None
-            continue
-
-        if not freando:
-            freando = True
-            rep.zones += 1
-            minimo = valor
-        elif valor < minimo - 0.01:              # começou a soltar
-            soltando = True
-            minimo = valor
-        elif soltando and not marcada and valor > minimo + BRAKE_STEP:
-            rep.jitter_zones += 1
-            marcada = True                       # uma marcação por freada
-
-        pico = max(pico, valor)
-        if valor >= BRAKE_HARD:
-            t_forte = tempo(i)
-
+    rep.zones = len(zonas)
+    rep.jitter_zones = sum(1 for z in zonas if z.jitter)
+    if mede_soltura:
+        rep.abrupt_zones = sum(1 for z in zonas if z.abrupt)
     return rep if rep.zones >= MIN_BRAKE_ZONES else None
 
 
@@ -311,13 +451,20 @@ def steering_rate(ch: LapChannels) -> Optional[float]:
     return _mean(taxas)
 
 
-def understeer_fraction(ch: LapChannels) -> Optional[float]:
+def understeer_fraction(ch: LapChannels, i0: int = 0,
+                        i1: Optional[int] = None,
+                        min_samples: int = None) -> Optional[float]:
     """
     Fração das amostras com MUITO volante e POUCO G lateral.
 
     É a assinatura do subesterço visto de fora: o piloto vira mais, o carro não
     vira mais. Comparar com o máximo da própria volta deixa a medida
     independente do carro e da pista.
+
+    `i0`/`i1` limitam a medida a um trecho — é assim que se mede curva por
+    curva. Os máximos de referência continuam sendo os da VOLTA INTEIRA, de
+    propósito: dentro de uma curva só, o maior volante e o maior G são os
+    daquela curva, e a fração daria alta em toda curva da pista.
     """
     if not ch.has("steer", "g_lat", "speed"):
         return None
@@ -326,9 +473,12 @@ def understeer_fraction(ch: LapChannels) -> Optional[float]:
     if steer_max <= 0 or glat_max <= 0:
         return None
 
-    virando, travado = 0, 0
     n = min(len(ch.steer), len(ch.g_lat), len(ch.speed))
-    for i in range(n):
+    fim = n if i1 is None else min(n, i1)
+    inicio = max(0, i0)
+
+    virando, travado = 0, 0
+    for i in range(inicio, fim):
         if ch.speed[i] < MIN_SPEED_KMH:
             continue
         if abs(ch.steer[i]) < steer_max * STEER_HIGH_FRACTION:
@@ -336,9 +486,38 @@ def understeer_fraction(ch: LapChannels) -> Optional[float]:
         virando += 1
         if abs(ch.g_lat[i]) < glat_max * GLAT_LOW_FRACTION:
             travado += 1
-    if virando < MIN_SAMPLES // 2:
+    minimo = MIN_SAMPLES // 2 if min_samples is None else min_samples
+    if virando < minimo:
         return None
     return travado / virando
+
+
+def worst_understeer_corner(ch: LapChannels, corners, track_length: float):
+    """
+    A curva em que o carro mais deixou de virar, e a fração dela.
+
+    Devolve `(corner, fração)` ou `(None, None)`. É o que troca "subesterço em
+    38% do tempo de curva" — verdadeiro e inútil — por "o carro não está
+    virando na entrada da Curva 7", que diz onde chegar diferente.
+
+    O mínimo de amostras por curva é menor que o da volta: uma curva de
+    segunda marcha tem poucas amostras de volante alto, e exigir o mínimo da
+    volta inteira descartaria justamente as curvas lentas, que são onde o
+    subesterço mais aparece.
+    """
+    if not corners or track_length <= 0 or not ch.distance:
+        return None, None
+    pior, pior_frac = None, None
+    for corner in corners:
+        i0, i1 = ch.corner_window(corner, track_length)
+        if i1 - i0 < 5:
+            continue
+        frac = understeer_fraction(ch, i0, i1, min_samples=8)
+        if frac is None:
+            continue
+        if pior_frac is None or frac > pior_frac:
+            pior, pior_frac = corner, frac
+    return pior, pior_frac
 
 
 # ---------------------------------------------------------------------------

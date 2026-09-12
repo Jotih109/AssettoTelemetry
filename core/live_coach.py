@@ -223,6 +223,18 @@ class CornerProfile:
     seeded: bool = False
 
     @property
+    def label(self) -> str:
+        """
+        Como esta curva é chamada num recado.
+
+        Guarda o nome do mapa em `name` (é ele que vai para o arquivo de
+        melhores passagens e para o detalhe), mas o que é DITO sai de
+        `ca.corner_label` — número, por padrão.
+        """
+        return ca.corner_label(ca.Corner(index=self.index, name=self.name,
+                                         start=0.0, end=1.0))
+
+    @property
     def is_problem(self) -> bool:
         """
         Já dá para dizer que esta curva é um problema, e não azar?
@@ -515,14 +527,19 @@ class LiveCoach:
         if not piores:
             return None
         detalhes = ", ".join(
-            f"{_decimos(p.avg_loss_s)} {'na' if _feminino(p.name) else 'no'} "
-            f"{p.name}" for p in piores)
+            f"{_decimos(p.avg_loss_s)} "
+            f"{'na' if _feminino(p.label) else 'no'} {p.label}"
+            for p in piores)
         return Advice(
             key="coach_summary", severity=INFO,
             text=f"Tem {_decimos(total)} na mesa: {detalhes}",
-            detail=" | ".join(f"{p.name} {p.avg_loss_s:+.3f}s "
-                              f"(melhor {p.target_section_s:.3f}s)"
-                              for p in piores if p.target_section_s is not None),
+            # O nome próprio da curva, quando existe, fica AQUI: no painel dá
+            # tempo de ler "Ferradura" e associar ao número que foi falado.
+            detail=" | ".join(
+                f"{p.label}"
+                + (f" ({p.name})" if p.name and p.name != p.label else "")
+                + f" {p.avg_loss_s:+.3f}s (melhor {p.target_section_s:.3f}s)"
+                for p in piores if p.target_section_s is not None),
             kind="lap", time_at_stake=total)
 
     def problem_corners(self, limit: int = None) -> List[CornerProfile]:
@@ -644,7 +661,8 @@ class LiveCoach:
                 continue
 
             delta = agora.section_time - ref.section_time
-            nome = corner.name or f"Curva {corner.index}"
+            nome = ca.corner_label(corner)
+            proprio = ca.corner_detail_name(corner)
 
             if delta > MAX_MEANINGFUL_LOSS_S:
                 # Rodada, escapada ou tráfego: o piloto já sabe. Não é técnica.
@@ -661,7 +679,9 @@ class LiveCoach:
                 return Advice(
                     key=f"coach_exit:{corner.index}",
                     severity=ATTENTION if delta >= 0.20 else INFO,
-                    text=texto, detail=f"{delta:+.3f}s na curva",
+                    text=texto,
+                    detail=(f"{delta:+.3f}s na curva"
+                            + (f" ({proprio})" if proprio else "")),
                     corner=corner.index, kind="live", time_at_stake=delta,
                     ttl_s=EXIT_TTL_S)
 
@@ -674,7 +694,8 @@ class LiveCoach:
                 return Advice(
                     key=f"coach_ok:{corner.index}", severity=INFO,
                     text=f"Isso! {_decimos(delta)} a mais na {nome}",
-                    detail=f"{delta:+.3f}s na curva",
+                    detail=(f"{delta:+.3f}s na curva"
+                            + (f" ({proprio})" if proprio else "")),
                     corner=corner.index, kind="live", time_at_stake=abs(delta),
                     ttl_s=EXIT_TTL_S)
         return None
@@ -728,7 +749,7 @@ class LiveCoach:
 
             self._cued.add(perfil.index)
             self._lap_cue_count += 1
-            nome = corner.name or f"Curva {corner.index}"
+            nome = ca.corner_label(corner)
             texto = _cue_text(nome, perfil)
             origem = "histórico" if perfil.seeded and perfil.samples == 0                 else f"{perfil.samples} volta(s)"
             return Advice(
@@ -754,16 +775,11 @@ _CAUSE_EXIT = {
 }
 
 
-def _feminino(nome: str) -> bool:
-    """
-    "na Ferradura" x "no Pinheirinho".
-
-    Heurística boba de propósito: nome de curva termina em 'a' na maioria dos
-    casos femininos ("Ferradura", "Laranjinha", "Curva 2"), e errar o artigo
-    numa frase falada custa menos que uma tabela de gêneros por pista.
-    """
-    nome = (nome or "").strip()
-    return bool(nome) and nome[-1].lower() == "a"
+#: O artigo do nome da curva vive em corner_analysis, junto com o resto do
+#: vocabulário de localização: o coach e o balanço de fim de volta falam das
+#: MESMAS curvas, e duas heurísticas de gênero separadas acabariam
+#: divergindo ("na Ferradura" aqui, "no Ferradura" lá).
+_feminino = ca.is_feminine
 
 
 def _cue_text(nome: str, perfil: CornerProfile) -> str:

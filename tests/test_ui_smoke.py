@@ -336,6 +336,10 @@ try:
             "telemetry": telemetry,
         })
         win.update_lap_selector_items()
+        # A janela está AO VIVO, e ao vivo o gráfico desenha a volta em
+        # andamento. As faixas caem sobre o que está desenhado, então a volta
+        # em andamento precisa existir para haver o que sombrear.
+        win.session_manager.current_lap_data = telemetry
 
         win._refresh_corner_map()
         assert win._corner_map is not None, "o mapa da pista MOCK não foi carregado"
@@ -367,6 +371,87 @@ try:
 
     check("painel curva a curva (mapa manual, tabela e faixas)",
           test_corner_analysis_panel)
+
+    def test_corner_regions_follow_the_plotted_lap():
+        """
+        As faixas caem sobre a volta DESENHADA, não sobre a volta analisada.
+
+        Este era o defeito: ao vivo o gráfico mostra a volta EM ANDAMENTO, mas
+        as faixas eram posicionadas com o mapa de tempo da última volta
+        FECHADA — e só eram recalculadas no fechamento da volta. Como a
+        conversão distância→tempo é própria de cada volta, o erro cresce ao
+        longo dela: com 1,3 s de diferença entre as duas voltas, a faixa da
+        penúltima curva caía mais de 1 s fora do lugar, e o piloto lia
+        "curva 7" sobre o trecho errado do gráfico.
+        """
+        from providers.mock import TRACK_LENGTH
+        import core.corner_analysis as ca_mod
+
+        n = 400
+        step = TRACK_LENGTH / n
+
+        def volta(escala_tempo):
+            return {
+                "times": [i * 0.22 * escala_tempo for i in range(n)],
+                "distance": [i * step for i in range(n)],
+                "speed": [90.0 + 60.0 * abs(((i % 80) / 80.0) - 0.5)
+                          for i in range(n)],
+                "gas": [1.0 if (i % 80) > 40 else 0.3 for i in range(n)],
+                "brake": [0.9 if (i % 80) in (30, 31, 32) else 0.0
+                          for i in range(n)],
+                "steer": [0.0] * n,
+                "sector": [0] * n,
+                "g_lat": [1.5 if (i % 80) > 35 else 0.05 for i in range(n)],
+                "car_x": [float(i) for i in range(n)],
+                "car_z": [float(i * 2) for i in range(n)],
+            }
+
+        fechada = volta(1.0)          # a volta que a TABELA analisa
+        ao_vivo = volta(0.90)         # a volta DESENHADA: 10% mais rápida
+
+        win.session_manager.completed_laps.clear()
+        win.session_manager.completed_laps.append({
+            "lap_number": 4,
+            "lap_time_str": "1:28.000",
+            "metadata": {"track": "Mock", "car": "Mock"},
+            "telemetry": fechada,
+        })
+        win.session_manager.current_lap_data = ao_vivo
+        win.update_lap_selector_items()
+        win.lap_selector.combo.setCurrentIndex(0)      # volta para AO VIVO
+        app.processEvents()
+        assert win.is_live
+
+        win._refresh_corner_map()
+        win._update_corner_analysis()
+        app.processEvents()
+
+        length = win._corner_track_length
+        assert win._corners and length, "sem mapa de curvas para o teste"
+
+        # A faixa de cada curva tem de bater com a volta AO VIVO, não com a
+        # fechada — e as duas dão instantes bem diferentes.
+        conferidas = 0
+        for i, corner in enumerate(win._corners):
+            regions, _ = win._corner_regions[i]
+            if not regions[0].isVisible():
+                continue
+            t0, t1 = regions[0].getRegion()
+            esperado = ca_mod.time_at_distance(ao_vivo, corner.start_m(length))
+            errado = ca_mod.time_at_distance(fechada, corner.start_m(length))
+            assert abs(t0 - esperado) < 0.05, (
+                f"curva {corner.index}: faixa em {t0:.2f}s, "
+                f"a volta desenhada passa em {esperado:.2f}s")
+            if abs(esperado - errado) > 0.2:
+                conferidas += 1
+        assert conferidas >= 3, (
+            f"só {conferidas} curvas distinguiam as duas voltas; "
+            "o teste não provaria nada")
+        return f"{conferidas} curvas alinhadas com a volta desenhada"
+
+    check("faixas de curva seguem a volta desenhada",
+          test_corner_regions_follow_the_plotted_lap)
+
 
     def test_corner_analysis_without_corner_map():
         """
@@ -588,16 +673,24 @@ try:
         validades = []
         real_voice = win.voice
 
+        volumes = []
+
         class VozFalsa:
             enabled = True
-            def say(self, texto, priority=None, ttl=None):
+            volume = 100          # volume geral, que a mesa de som multiplica
+
+            def say(self, texto, priority=None, ttl=None, volume=None):
                 faladas.append(texto)
                 prioridades.append(priority)
                 validades.append(ttl)
+                volumes.append(volume)
+
             def clear(self):
                 faladas.clear()
                 prioridades.clear()
                 validades.clear()
+                volumes.clear()
+
             def stop(self): pass
 
         win.voice = VozFalsa()

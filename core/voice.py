@@ -53,19 +53,50 @@ MAX_QUEUE = 3
 #: só por ter esperado o primeiro terminar.
 MAX_AGE_S = 15.0
 
-#: Velocidade da fala no SAPI (-10 lento .. +10 rápido). Um pouco acima do
-#: normal: as vozes OneCore falam devagar e o piloto já está duas curvas à
-#: frente quando a frase termina.
-DEFAULT_RATE = 2
+#: Velocidade da fala no SAPI (-10 lento .. +10 rápido).
+#:
+#: Acima do natural. Uma voz sintética em ritmo neutro lendo uma frase de dez
+#: palavras não soa calma: soa arrastada, porque falta a entonação que num
+#: humano quebraria a monotonia. Acelerar devolve parte desse ritmo — e o
+#: recado do engenheiro é curto de propósito, então a pressa não come sílaba.
+#:
+#: O que NÃO se resolve aqui é frase longa: mesmo em +3, vinte palavras levam
+#: cinco segundos. Recado que não cabe em ~12 palavras se conserta encurtando
+#: o texto, não apressando a voz.
+DEFAULT_RATE = 3
+
+#: Tom da voz no SAPI (-10 a +10, 0 = natural).
+#:
+#: Bem grave, e isto é uma escolha de gosto com um preço conhecido: deslocar o
+#: tom não muda como a voz é sintetizada — o Windows reamostra a fala já
+#: pronta, e quanto maior o deslocamento mais artefato ela carrega. O valor
+#: aqui foi escolhido de ouvido em `ajustar_voz.pyw`, comparando 0, -2 e -4 na
+#: mesma frase: o timbre de rádio de equipe compensou o custo.
+#:
+#: Quem preferir a voz mais limpa põe `voice_pitch: 0` no config.json — e quem
+#: quiser grave SEM artefato precisa de outra voz, não de outro número: a
+#: neural (Kokoro) sintetiza no timbre em vez de deslocar depois.
+DEFAULT_PITCH = -5
 
 #: Quantos WAV sintetizados ficam guardados antes da faxina.
 CACHE_MAX_FILES = 300
 
 #: Categoria das vozes OneCore (Windows 10/11) — vozes de alta qualidade.
 ONECORE_CATEGORY = r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech_OneCore\Voices"
-#: Desempate entre vozes do mesmo idioma.
-PREFERRED_VOICES = ("maria", "francisca", "antonio", "daniel")
+#: Desempate entre vozes do mesmo idioma, da preferida para a menos.
+#: Masculinas primeiro: é o timbre pedido, e a Daniel (OneCore pt-BR) é
+#: também a voz mais recente que o Windows instala em português — a Maria
+#: clássica é de 2010 e soa bem mais sintética.
+PREFERRED_VOICES = ("daniel", "antonio", "raul", "helio",
+                    "francisca", "maria", "heloisa")
 LANGUAGE_HINTS = ("portugu", "brazil", "brasil", "pt-br", "pt_br")
+
+#: Nomes que identificam voz masculina nos pacotes de português do Windows.
+#: Serve para escolher por GÊNERO quando a máquina tem um conjunto de vozes
+#: diferente do previsto — o PC de jogo pode ser outro Windows, com outro
+#: pacote de idioma instalado, e a lista acima não cobriria.
+MALE_VOICE_NAMES = ("daniel", "antonio", "antónio", "raul", "helio", "hélio",
+                    "julio", "júlio", "ricardo", "felipe", "fabio", "fábio")
 
 #: Modelos Kokoro aceitos, do mais novo para o mais antigo. Só o v1.0 tem
 #: português; o v0.19 é só inglês e por isso não serve para o engenheiro.
@@ -73,10 +104,13 @@ KOKORO_MODELS = (
     ("kokoro-v1.0.onnx", "voices-v1.0.bin"),
     ("kokoro-v1.0.int8.onnx", "voices-v1.0.bin"),
 )
-#: Voz e idioma do Kokoro (`pf_dora` é a voz feminina pt-BR do pacote v1.0).
-KOKORO_VOICE = os.environ.get("APEXVIEW_KOKORO_VOICE", "pf_dora")
+#: Voz e idioma do Kokoro. `pm_alex` é a voz MASCULINA pt-BR do pacote v1.0
+#: (as femininas são `pf_dora`; `pm_santa` é o outro timbre masculino).
+KOKORO_VOICE = os.environ.get("APEXVIEW_KOKORO_VOICE", "pm_alex")
 KOKORO_LANG = os.environ.get("APEXVIEW_KOKORO_LANG", "pt-br")
-KOKORO_SPEED = float(os.environ.get("APEXVIEW_KOKORO_SPEED", "1.05"))
+#: 1.0 = ritmo natural do modelo. Acelerar uma voz neural desfaz justamente
+#: a prosódia que a torna menos robótica.
+KOKORO_SPEED = float(os.environ.get("APEXVIEW_KOKORO_SPEED", "1.0"))
 
 
 # ---------------------------------------------------------------------------
@@ -86,16 +120,20 @@ KOKORO_SPEED = float(os.environ.get("APEXVIEW_KOKORO_SPEED", "1.05"))
 class _Utterance:
     """Uma frase esperando a vez."""
 
-    __slots__ = ("text", "priority", "seq", "created_at", "ttl")
+    __slots__ = ("text", "priority", "seq", "created_at", "ttl", "volume")
 
     def __init__(self, text: str, priority: int, seq: int, created_at: float,
-                 ttl: float = None):
+                 ttl: float = None, volume: int = None):
         self.text = text
         self.priority = priority
         self.seq = seq
         self.created_at = created_at
         #: Validade PRÓPRIA deste recado, em segundos. Sem ela vale MAX_AGE_S.
         self.ttl = ttl
+        #: Volume DESTE recado (0-100). `None` = o volume geral da voz. É o
+        #: que a mesa de som usa para deixar o coach de curva no ouvido e o
+        #: aviso de consumo lá no fundo, sem mexer no volume do resto.
+        self.volume = volume
 
     def is_stale(self, now: float) -> bool:
         """
@@ -128,7 +166,8 @@ class _SpeechQueue:
         self._closed = False
         self._seq = 0
 
-    def put(self, text: str, priority: int, now: float, ttl: float = None):
+    def put(self, text: str, priority: int, now: float, ttl: float = None,
+            volume: int = None):
         with self._cond:
             if self._closed:
                 return
@@ -144,11 +183,13 @@ class _SpeechQueue:
                     u.priority = priority
                     u.created_at = now
                     u.ttl = ttl
+                    u.volume = volume
                     self._items.sort(key=lambda x: (x.priority, x.seq))
                     self._cond.notify()
                 return
             self._seq += 1
-            self._items.append(_Utterance(text, priority, self._seq, now, ttl))
+            self._items.append(
+                _Utterance(text, priority, self._seq, now, ttl, volume))
             self._items.sort(key=lambda u: (u.priority, u.seq))
             while len(self._items) > self.maxsize:
                 self._items.pop(self._drop_index())
@@ -377,7 +418,13 @@ class KokoroBackend:
         return None, None
 
     def _resolve_voice(self) -> str:
-        """Se a voz pedida não existir no modelo, usa a primeira em português."""
+        """
+        Se a voz pedida não existir no modelo, usa outra em português.
+
+        Entre as em português, prefere a masculina: no Kokoro o prefixo é
+        `pm_` para masculina e `pf_` para feminina. Sem essa preferência, um
+        modelo sem a `pm_alex` cairia na feminina e desfaria a escolha de voz.
+        """
         try:
             vozes = list(self._engine.get_voices())
         except Exception:
@@ -386,14 +433,15 @@ class KokoroBackend:
             return self.voice
         # No Kokoro o prefixo "p" identifica as vozes em português.
         pt = [v for v in vozes if v.startswith("p")]
-        escolhida = (pt or vozes)[0]
+        masculinas = [v for v in pt if v.startswith("pm")]
+        escolhida = (masculinas or pt or vozes)[0]
         print(f"[Voice/Kokoro] Voz '{self.voice}' não existe no modelo; "
               f"usando '{escolhida}'")
         return escolhida
 
     # -- síntese ---------------------------------------------------------
 
-    def _synth(self, text: str) -> bytes:
+    def _synth(self, text: str, volume: int = None) -> bytes:
         """Sintetiza e devolve os bytes de um WAV mono 16 bits."""
         import io
 
@@ -401,7 +449,13 @@ class KokoroBackend:
 
         samples, sample_rate = self._engine.create(
             text, voice=self.voice, speed=self.speed, lang=self.lang)
-        pcm = (np.clip(np.asarray(samples), -1.0, 1.0) * 32767).astype(np.int16)
+        audio = np.asarray(samples)
+        if volume is not None:
+            # Escala linear na amostra. Um backend neural entrega o áudio, não
+            # fala: sem isto o Kokoro ignoraria a mesa de som em silêncio, e o
+            # piloto acharia que os faders quebraram ao instalar a voz neural.
+            audio = audio * (max(0, min(100, int(volume))) / 100.0)
+        pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
 
         buffer = io.BytesIO()
         with wave.open(buffer, "wb") as wf:
@@ -411,13 +465,18 @@ class KokoroBackend:
             wf.writeframes(pcm.tobytes())
         return buffer.getvalue()
 
-    def speak(self, text: str, should_stop: Callable[[], bool]) -> bool:
+    def speak(self, text: str, should_stop: Callable[[], bool],
+              volume: int = None) -> bool:
         if not self.available or self._engine is None:
             return False
         try:
-            path = self._cache.get_cached_path(text)
+            # O volume entra na CHAVE do cache: o mesmo texto em dois volumes
+            # são dois áudios diferentes, e tocar o do volume errado desfaria
+            # a mesa de som em silêncio.
+            chave = text if volume is None else f"{text}\x00v{int(volume)}"
+            path = self._cache.get_cached_path(chave)
             if path is None:
-                path = self._cache.save_wav(text, self._synth(text))
+                path = self._cache.save_wav(chave, self._synth(text, volume))
             if not path:
                 return False
             return _play_wav(path, should_stop)
@@ -442,12 +501,23 @@ class SapiBackend:
     #: Flags do SAPI (`ISpVoice::Speak`).
     _ASYNC = 1
     _PURGE = 2
+    #: Interpreta marcação XML no texto — é o que permite ajustar o tom.
+    _IS_XML = 8
 
-    def __init__(self, rate: int = DEFAULT_RATE, volume: int = 100):
+    def __init__(self, rate: int = DEFAULT_RATE, volume: int = 100,
+                 pitch: int = DEFAULT_PITCH, voice_name: str = "",
+                 prefer_male: bool = True):
         self.rate = rate
         self.volume = volume
+        self.pitch = pitch
+        self.voice_name = voice_name
+        self.prefer_male = prefer_male
         self.available = False
         self.description = ""
+        #: Descrição de todas as vozes que a máquina oferece. Fica guardada
+        #: para o app poder LISTAR as opções: o piloto só consegue escolher
+        #: `voice_name` se souber o que existe instalado.
+        self.installed: List[str] = []
         self._voice = None
         self._com = None
 
@@ -511,24 +581,61 @@ class SapiBackend:
 
     def _best_token(self, win32com, voice):
         melhor, melhor_nota = None, -10 ** 6
+        self.installed = []
         for token in self._all_tokens(win32com, voice):
             try:
-                nota = VoiceEngine.voice_score(token.GetDescription())
+                descricao = token.GetDescription()
+                nota = VoiceEngine.voice_score(
+                    descricao, prefer_name=self.voice_name,
+                    prefer_male=self.prefer_male)
             except Exception:
                 continue
+            if descricao not in self.installed:
+                self.installed.append(descricao)
             if nota > melhor_nota:
                 melhor, melhor_nota = token, nota
         return melhor
 
     # -- fala ------------------------------------------------------------
 
-    def speak(self, text: str, should_stop: Callable[[], bool]) -> bool:
+    @staticmethod
+    def _escape_xml(text: str) -> str:
+        """
+        Escapa o texto para ir dentro de marcação XML do SAPI.
+
+        Sem isto, um recado que contenha "&" ou "<" faria o SAPI engolir a
+        frase inteira em silêncio — e um recado não dito é pior que um recado
+        sem entonação.
+        """
+        return (text.replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;"))
+
+    def _marcado(self, text: str, volume: int = None) -> tuple:
+        """
+        O texto e as flags a usar, com os ajustes de tom e volume quando houver.
+
+        Devolve o texto cru e as flags sem XML quando não há ajuste nenhum:
+        assim o caminho comum não depende do parser XML do SAPI.
+        """
+        marcas = ""
+        if self.pitch:
+            marcas += f'<pitch absmiddle="{max(-10, min(10, int(self.pitch)))}"/>'
+        if volume is not None:
+            marcas += f'<volume level="{max(0, min(100, int(volume)))}"/>'
+        if not marcas:
+            return text, self._ASYNC
+        return marcas + self._escape_xml(text), self._ASYNC | self._IS_XML
+
+    def speak(self, text: str, should_stop: Callable[[], bool],
+              volume: int = None) -> bool:
         if not self.available or self._voice is None:
             return False
+        falado, flags = self._marcado(text, volume)
         try:
             # Assíncrono + espera em fatias: é o que permite cortar a frase
             # quando chega um recado crítico.
-            self._voice.Speak(text, self._ASYNC)
+            self._voice.Speak(falado, flags)
             while not self._voice.WaitUntilDone(50):
                 if should_stop():
                     self._voice.Speak("", self._PURGE)
@@ -555,17 +662,32 @@ class VoiceEngine:
     """
 
     def __init__(self, enabled: bool = True, rate: int = DEFAULT_RATE,
-                 backend: str = "auto", volume: int = 100):
+                 backend: str = "auto", volume: int = 100,
+                 pitch: int = DEFAULT_PITCH, preferred_voice: str = "",
+                 prefer_male: bool = True):
         self.enabled = enabled
         self.rate = rate
         self.volume = volume
+        self.pitch = pitch
+        #: Nome (ou pedaço do nome) da voz escolhida pelo piloto. Vazio = o
+        #: app escolhe a melhor que encontrar.
+        self.preferred_voice = preferred_voice
+        self.prefer_male = prefer_male
         self.backend_option = backend
         self.available = False
         self.voice_name = ""
+        #: Vozes que a máquina oferece, para o app poder listá-las.
+        self.installed_voices: List[str] = []
 
         self._queue = _SpeechQueue()
         self._ready = threading.Event()
         self._stopping = threading.Event()
+        #: Ligado quando não há nada na fila NEM nada sendo falado. É o que
+        #: permite a alguém esperar a fala acabar — a ferramenta de ajuste de
+        #: voz precisa disso para medir quanto tempo um recado realmente leva,
+        #: que é a pergunta que decide se a frase está longa demais.
+        self._idle = threading.Event()
+        self._idle.set()
         self._backends: List[object] = []
         self._thread = threading.Thread(target=self._run, name="VoiceEngine",
                                         daemon=True)
@@ -574,22 +696,37 @@ class VoiceEngine:
     # -- API pública ------------------------------------------------------
 
     def say(self, text: str, priority: int = PRIORITY_NORMAL,
-            ttl: float = None):
+            ttl: float = None, volume: int = None):
         """
         Enfileira uma fala. Volta imediatamente.
 
         `ttl` é a validade do recado em segundos: passado esse tempo na fila,
         ele é descartado em vez de dito atrasado. Recado com hora marcada —
         uma dica de curva — deve declarar a sua; sem `ttl` vale MAX_AGE_S.
+
+        `volume` (0-100) é o volume DESTE recado; sem ele vale o volume geral.
+        É por aqui que a mesa de som (core/voice_mix.py) mistura os assuntos.
         """
         text = (text or "").strip()
         if not text or not self.enabled or self._stopping.is_set():
             return
-        self._queue.put(text, priority, time.monotonic(), ttl)
+        self._idle.clear()
+        self._queue.put(text, priority, time.monotonic(), ttl, volume)
 
     def clear(self):
         """Esvazia o que ainda não foi falado (não corta a frase em curso)."""
         self._queue.clear()
+
+    def is_idle(self) -> bool:
+        """
+        Nada na fila e nada sendo falado, AGORA — sem bloquear.
+
+        Não existe versão que ESPERA de propósito: quem quer saber quando a
+        fala acabou é uma interface, e bloquear a interface até a frase
+        terminar é justamente o que não se pode fazer. Quem pergunta aqui é um
+        timer, que continua desenhando entre uma checagem e outra.
+        """
+        return self._idle.is_set()
 
     def wait_ready(self, timeout: float = 5.0) -> bool:
         """
@@ -611,22 +748,47 @@ class VoiceEngine:
     # -- pontuação das vozes ---------------------------------------------
 
     @staticmethod
-    def voice_score(description: str) -> int:
+    def voice_score(description: str, prefer_name: str = "",
+                    prefer_male: bool = True) -> int:
         """
         Nota de uma voz do Windows pela descrição.
 
-        O idioma pesa mais que tudo: voz em inglês lendo português fica
-        incompreensível. Depois vem a geração — as vozes OneCore do Windows
-        10/11 são muito melhores que as "Desktop", que são de 2010.
+        A ordem dos pesos é a ordem do que estraga a fala:
+
+        1. **Idioma** (200) — voz em inglês lendo português fica
+           incompreensível. Nada compensa isso.
+        2. **Geração** (80 / -100) — as vozes OneCore do Windows 10/11 são
+           muito melhores que as "Desktop", de 2010.
+        3. **Gênero** (60) — masculina quando pedida. Pesa menos que idioma e
+           geração de propósito: numa máquina que só tenha voz feminina em
+           português, é melhor uma voz feminina boa do que uma masculina em
+           inglês, ou a Desktop antiga.
+        4. **Nome preferido** (até 40) — só desempate.
+
+        `prefer_name` vem da configuração e vence tudo: se o piloto escolheu
+        uma voz pelo nome, é essa que ele quer ouvir, e o app não deve
+        adivinhar melhor que ele.
         """
         d = (description or "").lower()
+
+        # A voz escolhida pelo piloto ganha de qualquer critério nosso, mas o
+        # bônus é SOMADO à nota normal, não substitui: uma máquina com
+        # "Maria" clássica e "Maria" OneCore atende as duas pelo nome, e é a
+        # nota que decide qual — senão a escolha ficava na ordem de
+        # enumeração do Windows, que não é nossa para garantir.
         score = 0
+        alvo = (prefer_name or "").strip().lower()
+        if alvo and alvo in d:
+            score += 10 ** 6
+
         if any(hint in d for hint in LANGUAGE_HINTS):
             score += 200
         score += -100 if "desktop" in d else 80
+        if prefer_male and any(nome in d for nome in MALE_VOICE_NAMES):
+            score += 60
         for i, name in enumerate(PREFERRED_VOICES):
             if name in d:
-                score += max(40 - i * 8, 5)     # maria=40, francisca=32, ...
+                score += max(40 - i * 5, 5)     # daniel=40, antonio=35, ...
                 break
         return score
 
@@ -638,7 +800,10 @@ class VoiceEngine:
         if self.backend_option in ("auto", "kokoro"):
             candidatos.append(KokoroBackend())
         if self.backend_option in ("auto", "sapi"):
-            candidatos.append(SapiBackend(rate=self.rate, volume=self.volume))
+            candidatos.append(SapiBackend(
+                rate=self.rate, volume=self.volume, pitch=self.pitch,
+                voice_name=self.preferred_voice,
+                prefer_male=self.prefer_male))
         return candidatos
 
     def _start_backends(self):
@@ -653,9 +818,22 @@ class VoiceEngine:
                 self._backends.append(backend)
 
         self.available = bool(self._backends)
+        for backend in self._backends:
+            for descricao in getattr(backend, "installed", []) or []:
+                if descricao not in self.installed_voices:
+                    self.installed_voices.append(descricao)
+
         if self.available:
             self.voice_name = self._backends[0].description or self._backends[0].name
-            print(f"[Voice] Engenheiro com voz: {self.voice_name}")
+            print(f"[Voice] Engenheiro com voz: {self.voice_name} "
+                  f"(ritmo {self.rate:+d}, tom {self.pitch:+d})")
+            # Lista o que existe instalado. É a única forma de o piloto saber
+            # o que pode pôr em `voice_name` no config.json — as vozes variam
+            # de máquina para máquina conforme o pacote de idioma instalado.
+            outras = [v for v in self.installed_voices if v != self.voice_name]
+            if outras:
+                print("[Voice] Outras vozes nesta máquina (use 'voice_name' "
+                      "no config.json para escolher): " + "; ".join(outras))
         else:
             print("[Voice] Nenhum sintetizador disponível; "
                   "o painel de texto continua normalmente")
@@ -668,15 +846,23 @@ class VoiceEngine:
 
         try:
             while not self._stopping.is_set():
+                if self._queue.peek_priority() is None:
+                    self._idle.set()
                 fala = self._queue.get()
                 if fala is None:
                     break
-                if not self.enabled or not self.available:
-                    continue
-                if fala.is_stale(time.monotonic()):
-                    continue                    # perdeu a validade na fila
-                self._speak(fala)
+                self._idle.clear()
+                try:
+                    if not self.enabled or not self.available:
+                        continue
+                    if fala.is_stale(time.monotonic()):
+                        continue                # perdeu a validade na fila
+                    self._speak(fala)
+                finally:
+                    if self._queue.peek_priority() is None:
+                        self._idle.set()
         finally:
+            self._idle.set()
             for backend in self._backends:
                 try:
                     backend.shutdown()
@@ -703,7 +889,7 @@ class VoiceEngine:
             if not getattr(backend, "available", False):
                 continue
             try:
-                if backend.speak(fala.text, interrompe):
+                if backend.speak(fala.text, interrompe, fala.volume):
                     return
             except Exception as e:
                 print(f"[Voice] {backend.name} falhou ({type(e).__name__}: {e})")

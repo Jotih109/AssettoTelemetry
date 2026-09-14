@@ -142,6 +142,20 @@ class LapAnalysisWindow(QMainWindow):
             f"color: {T.TXT_UNIT}; background: transparent; font-size: 11px;")
         layout.addWidget(self.lbl_status)
 
+        btn_studio = QPushButton("⚡ ESTÚDIO PRO (MAIN2)")
+        btn_studio.setCursor(Qt.PointingHandCursor)
+        btn_studio.setToolTip("Abre a estação de telemetria ponto a ponto estilo MoTeC (main2.pyw) com traçado interativo, frenagem e replay")
+        btn_studio.clicked.connect(self.on_open_studio)
+        btn_studio.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {T.BG_HEADER}; color: #00e5ff;
+                border: 1px solid #00e5ff; padding: 6px;
+                font-family: "{T.FONT_UI}"; font-size: 11px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: #00e5ff; color: #000; }}
+        """)
+        layout.addWidget(btn_studio)
+
         buttons = QHBoxLayout()
         buttons.setSpacing(4)
         for text, slot, tip in (
@@ -525,6 +539,7 @@ class LapAnalysisWindow(QMainWindow):
                 background-color: {T.BG_HEADER}; color: #ffffff;
             }}
         """)
+        act_studio = menu.addAction("⚡ Abrir no Estúdio Pro (main2.pyw)")
         act_report = menu.addAction("📊 Gerar Relatório de Desempenho")
         act_motec = menu.addAction("Exportar MoTeC (.ld)")
         act_csv = menu.addAction("Exportar CSV")
@@ -533,7 +548,9 @@ class LapAnalysisWindow(QMainWindow):
         act_del = menu.addAction("Apagar")
 
         action = menu.exec_(self.tree.viewport().mapToGlobal(pos))
-        if action == act_report:
+        if action == act_studio:
+            self.on_open_studio()
+        elif action == act_report:
             self.on_generate_report()
         elif action == act_motec:
             self.on_export_motec()
@@ -543,6 +560,15 @@ class LapAnalysisWindow(QMainWindow):
             self.on_pin_clicked()
         elif action == act_del:
             self.on_delete_clicked()
+
+    def on_open_studio(self):
+        from ui.telemetry_studio import TelemetryStudioWindow
+        self._studio_win = TelemetryStudioWindow(self.library)
+        marcadas = self._selected_records()
+        if marcadas:
+            track, car, rec = marcadas[0]
+            self._studio_win.load_lap(track, car, rec)
+        self._studio_win.show()
 
 
 class LapReportDialog(QDialog):

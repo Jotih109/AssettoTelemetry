@@ -356,6 +356,40 @@ python mapa.pyw
 
 ---
 
+### 🏁 Estação de Telemetria Ponto a Ponto (`main2.pyw`)
+Estação de trabalho dedicada de engenharia de corrida real (**MoTeC Telemetry Studio**), projetada para análise **ponto a ponto** e visualização espacial de frenagem e aceleração:
+
+```bash
+python main2.pyw
+```
+*(Também pode ser aberta diretamente a partir do `mapa.pyw` pelo botão **`⚡ ESTÚDIO PRO (MAIN2)`** ou do dashboard principal pelo botão **`TELEMETRIA (MAIN2)`**).*
+
+#### 🚀 Recursos de Nível MoTeC i2 / VRS / Popometer:
+1. **Traçado 2D com Heatmap Interativo:**
+   - **Frenagem & Acelerador:** veja com clareza cristalina **onde você freou** (vermelho vivo para frenagem pesada, laranja/amarelo para transição de *trail braking* aliviando o pedal na entrada da curva, verde para aceleração plena e cinza em transição).
+   - **Heatmap de Velocidade:** gradiente contínuo de velocidade (azul nas curvas lentas até vermelho nas retas).
+   - **Marchas:** cores individuais para cada marcha engatada ao redor da pista.
+   - **Delta Espacial:** verde onde você está ganhando tempo em relação à volta de referência e vermelho onde está perdendo.
+2. **Marcadores de Curvas e Ápices na Pista:**
+   - Pontos de início de frenagem com velocidade (🔴 ex: `195 km/h`).
+   - Ponto de ápice com velocidade mínima (🟡 ex: `74 km/h`).
+   - Badges com o nome oficial ou numeração de cada curva.
+3. **Inspeção Ponto a Ponto Sincronizada (Snap por Proximidade):**
+   - Ao passar o mouse ou clicar em qualquer trecho do traçado da pista, o cursor salta instantaneamente para o ponto exato da volta.
+   - O carro principal (Ciano) e o carro fantasma de referência (Laranja) são desenhados na pista com vetor de direção e ângulo.
+4. **Círculo de Atrito G-G (Friction Circle):**
+   - Diagrama MoTeC de Força G Lateral vs Longitudinal com anéis de 0.5G a 2.0G e rastro da trajetória recente, permitindo visualizar com clareza o *trail braking* e se o limite de aderência foi 100% aproveitado.
+5. **HUD de Telemetria Digital:**
+   - Velocímetro em tempo real, barras de freio e acelerador com percentual exato (0-100%), mostrador de ângulo de volante em graus (`↰ -24°` / `↱ +18°`), marcha grande e tacômetro de RPM.
+6. **Replay com Scrubber e Velocidade Variável:**
+   - Assista à volta se desenhar ponto a ponto em velocidade real (1.0x), acelerada (2.0x) ou câmera lenta (0.25x / 0.5x) para estudar cada movimento de pedal.
+7. **Tabela Curva a Curva (Turn-by-Turn):**
+   - Ponto de frenagem em metros, velocidade no ápice, ponto de retomada de acelerador pleno e tempo da curva. Clicar em qualquer linha da tabela pula a visualização para aquela curva.
+8. **Modo Demonstração Instantâneo (Mock Demo):**
+   - Se você ainda não abriu o jogo ou não gravou voltas, o botão **`⚡ CARREGAR VOLTA DEMO (MOCK)`** gera na hora uma volta realista em Interlagos com o Porsche 992 GT3 Cup para você explorar todas as ferramentas imediatamente.
+
+---
+
 ### 📊 Relatórios de Desempenho & Diagnóstico Causal (Onde Melhorar e Por Quê)
 
 Mais do que apenas exibir curvas de telemetria na tela, o ApexView conta com um motor analítico de engenharia de pista ([core/lap_report.py](core/lap_report.py)) projetado para responder com precisão matemática às três perguntas essenciais de qualquer piloto:

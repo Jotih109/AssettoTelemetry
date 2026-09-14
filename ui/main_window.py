@@ -282,6 +282,25 @@ class DashboardMainWindow(QMainWindow):
         graph_header_row.addWidget(self.btn_corners, alignment=Qt.AlignVCenter)
         graph_header_row.addSpacing(4)
         graph_header_row.addWidget(self.btn_export, alignment=Qt.AlignVCenter)
+
+        self.btn_open_studio = QPushButton("TELEMETRIA (MAIN2)")
+        self.btn_open_studio.setFont(T.f_title(8))
+        self.btn_open_studio.setCursor(Qt.PointingHandCursor)
+        self.btn_open_studio.setToolTip("Abre a tela de telemetria ponto a ponto estilo MoTeC (main2.pyw)")
+        self.btn_open_studio.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {T.BG_INSET};
+                color: #00e5ff;
+                border: 1px solid #00e5ff;
+                border-radius: 0px;
+                padding: 4px 10px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: {T.BG_HEADER}; color: #ffffff; }}
+        """)
+        self.btn_open_studio.clicked.connect(self.on_open_studio_clicked)
+        graph_header_row.addSpacing(4)
+        graph_header_row.addWidget(self.btn_open_studio, alignment=Qt.AlignVCenter)
         right_area.addLayout(graph_header_row)
 
         # --- Pilha de gráficos, no estilo i2 -------------------------------
@@ -2271,3 +2290,10 @@ class DashboardMainWindow(QMainWindow):
             total_h = self.plot_splitter.height()
             part = total_h // 4
             self.plot_splitter.setSizes([part, part, part, total_h - (part * 3)])
+
+    def on_open_studio_clicked(self):
+        """Abre a tela de telemetria ponto a ponto estilo MoTeC (main2.pyw)."""
+        from ui.telemetry_studio import TelemetryStudioWindow
+        self._studio_win = TelemetryStudioWindow(self.session_manager.library)
+        self._studio_win.show()
+

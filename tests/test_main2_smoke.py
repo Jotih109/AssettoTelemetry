@@ -113,12 +113,42 @@ try:
 
     def test_heatmap_modes():
         # Testa todos os modos de cor do traçado
-        for mode in ("brake_throttle", "speed", "gear", "delta", "single"):
+        for mode in ("brake_throttle", "speed", "gear", "delta", "micro_sectors", "single"):
             win.track_map.set_color_mode(mode)
             assert win.track_map.color_mode == mode
             assert len(win.track_map._cached_segments) > 0
 
-    check("alternância dos modos de heatmap do traçado (Freio, Velocidade, Marcha, Delta)", test_heatmap_modes)
+    check("alternância dos modos de heatmap do traçado (Freio, Velocidade, Marcha, Delta, Micro-setores)", test_heatmap_modes)
+
+    def test_sectors_and_micro_sectors():
+        # Verifica a análise de setores e micro-setores
+        assert win.sector_analysis is not None
+        assert len(win.sector_analysis.sectors) == 3
+        assert len(win.sector_analysis.micro_sectors) == 24
+        assert win.sectors_ribbon is not None
+        assert win.sectors_ribbon.card_s1.lbl_time.text() != "--.--- s"
+        assert win.micro_table is not None
+        assert win.micro_table.rowCount() == 24
+
+        # Testa clique no micro-setor da tabela para navegação
+        jumped_dist = []
+        win.micro_table.sig_micro_clicked.connect(lambda d: jumped_dist.append(d))
+        first_item = win.micro_table.item(3, 0)
+        win.micro_table._on_item_clicked(first_item)
+        assert len(jumped_dist) == 1
+        assert jumped_dist[0] > 0
+
+        # Testa clique na barra segmentada (strip) de micro-setores
+        strip_jumps = []
+        win.sectors_ribbon.sig_seek_distance.connect(lambda d: strip_jumps.append(d))
+        win.sectors_ribbon.card_s2.strip.sig_micro_clicked.emit(1500.0)
+        assert len(strip_jumps) == 1
+
+        # Verifica sincronização com o HUD
+        win._on_point_seek(10)
+        assert "Micro" in win.hud.lbl_sector_badge.text()
+
+    check("sistema de setores e micro-setores (Ribbon F1, 24 splits, navegação e HUD)", test_sectors_and_micro_sectors)
 
     def test_point_to_point_snap():
         # Pula para o ponto 45

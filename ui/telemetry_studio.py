@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import (
     QSplitter, QPushButton, QTreeWidget, QTreeWidgetItem, QFileDialog,
     QAbstractItemView, QComboBox, QMenu, QDialog, QTextEdit, QProgressBar,
     QSlider, QTableWidget, QTableWidgetItem, QHeaderView, QFrame, QCheckBox,
-    QButtonGroup, QRadioButton, QShortcut,
+    QButtonGroup, QRadioButton, QShortcut, QTabWidget,
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPointF, QRectF, QLineF
 from PyQt5.QtGui import (
@@ -33,6 +33,7 @@ import numpy as np
 
 from core.lap_library import LapLibrary, LapRecord, RetentionPolicy
 from core import corner_analysis as ca
+from core import sector_analysis as sa
 from ui import theme as T
 
 
@@ -209,6 +210,11 @@ class PointInspectorWidget(QFrame):
         self.lbl_distance.setStyleSheet(f"color: {T.TXT_VALUE};")
         b1.addWidget(self.lbl_distance)
 
+        self.lbl_sector_badge = QLabel("S1 · Micro 01/24")
+        self.lbl_sector_badge.setFont(QFont(T.FONT_MONO, 9, QFont.Bold))
+        self.lbl_sector_badge.setStyleSheet("color: #00e5ff;")
+        b1.addWidget(self.lbl_sector_badge)
+
         self.lbl_time = QLabel("Tempo: 0.000 s")
         self.lbl_time.setFont(QFont(T.FONT_MONO, 9))
         self.lbl_time.setStyleSheet(f"color: {T.TXT_UNIT};")
@@ -371,6 +377,14 @@ class PointInspectorWidget(QFrame):
         self.lbl_distance.setText(f"{dist:.0f} m  ·  {prog:.1f}% da volta")
         self.lbl_time.setText(f"Tempo: {time_s:.3f} s")
 
+        sector_phrase = data.get("sector_phrase", "")
+        micro_delta_str = data.get("micro_delta_str", "")
+        if sector_phrase:
+            badge_txt = f"{sector_phrase}  ·  {micro_delta_str}" if micro_delta_str else sector_phrase
+            self.lbl_sector_badge.setText(badge_txt)
+        else:
+            self.lbl_sector_badge.setText("Pista")
+
         speed = data.get("speed", 0.0)
         self.lbl_speed.setText(f"{speed:.1f} km/h")
 
@@ -467,6 +481,10 @@ class TrackMapProWidget(QWidget):
         self.corner_map: Optional[ca.CornerMap] = None
         self.corner_metrics: List[ca.CornerMetrics] = []
 
+        # Análise de setores e micro-setores
+        self.sector_analysis: Optional[sa.LapSectorAnalysis] = None
+        self.show_sector_gates: bool = True
+
         # Estado da visualização
         self.color_mode = "brake_throttle"
         self.show_markers = True
@@ -533,6 +551,16 @@ class TrackMapProWidget(QWidget):
         self.rebuild_visuals()
         self.update()
 
+    def set_sector_analysis(self, analysis: Optional[sa.LapSectorAnalysis]):
+        self.sector_analysis = analysis
+        if self.color_mode == "micro_sectors":
+            self.rebuild_visuals()
+        self.update()
+
+    def set_show_sector_gates(self, show: bool):
+        self.show_sector_gates = show
+        self.update()
+
     def set_show_markers(self, show: bool):
         self.show_markers = show
         self.update()
@@ -582,6 +610,7 @@ class TrackMapProWidget(QWidget):
         speeds = self.telemetry.get("speed") or [100.0] * self.total_points
         gears = self.telemetry.get("gear") or [3] * self.total_points
         deltas = self.telemetry.get("delta") or [0.0] * self.total_points
+        distances = self.telemetry.get("distance") or [0.0] * self.total_points
 
         min_spd = float(np.min(speeds)) if speeds else 60.0
         max_spd = float(np.max(speeds)) if speeds else 250.0
@@ -643,6 +672,18 @@ class TrackMapProWidget(QWidget):
                 else:
                     seg_color = QColor("#00e5ff")
                 width = 3.0
+
+            elif self.color_mode == "micro_sectors":
+                if self.sector_analysis and self.sector_analysis.micro_sectors:
+                    d = distances[i] if i < len(distances) else 0.0
+                    _, m_info = sa.get_micro_sector_at(self.sector_analysis, d)
+                    if m_info:
+                        seg_color = QColor(m_info.color)
+                    else:
+                        seg_color = QColor(LAP_COLOR_MAIN)
+                else:
+                    seg_color = QColor(LAP_COLOR_MAIN)
+                width = 3.6
             else:
                 seg_color = QColor(LAP_COLOR_MAIN)
                 width = 3.0
@@ -787,7 +828,11 @@ class TrackMapProWidget(QWidget):
 
         painter.restore()
 
-        # 3. Marcadores de Frenagem e Curvas
+        # 3. Portais Transversais de Setores (S1, S2, Linha de Chegada)
+        if self.show_sector_gates:
+            self._draw_sector_gates(painter)
+
+        # 4. Marcadores de Frenagem e Curvas
         if self.show_markers:
             self._draw_markers(painter)
 
@@ -888,6 +933,72 @@ class TrackMapProWidget(QWidget):
                     painter.setPen(QColor("#80d8ff"))
                     painter.drawText(int(pt.x() - 20), int(pt.y() - 14), m.corner.name)
 
+    def _draw_sector_gates(self, painter: QPainter):
+        """Desenha os portais transversais de transição de setor (S1, S2, Chegada) sobre a pista."""
+        if not self.sector_analysis or not self.sector_analysis.sectors:
+            return
+        if self.total_points < 2:
+            return
+
+        distances = self.telemetry.get("distance") or []
+        if len(distances) != self.total_points:
+            return
+
+        gates = [
+            (0.0, "L/C 🏁", QColor("#ffffff")),
+            (self.sector_analysis.sectors[0].end_m, "S1 🏁", QColor("#00e5ff")),
+            (self.sector_analysis.sectors[1].end_m, "S2 🏁", QColor("#ffd600")),
+        ]
+
+        painter.setFont(QFont(T.FONT_UI, 8, QFont.Bold))
+
+        for dist_m, label, gate_color in gates:
+            idx = min(bisect.bisect_left(distances, dist_m), self.total_points - 1)
+            p0 = self.world_to_screen(float(self.cx[idx]), float(self.cz[idx]))
+
+            next_idx = min(self.total_points - 1, idx + 1)
+            prev_idx = max(0, idx - 1)
+            p_next = self.world_to_screen(float(self.cx[next_idx]), float(self.cz[next_idx]))
+            p_prev = self.world_to_screen(float(self.cx[prev_idx]), float(self.cz[prev_idx]))
+
+            dx = p_next.x() - p_prev.x()
+            dy = p_next.y() - p_prev.y()
+            length = math.hypot(dx, dy)
+            if length < 0.001:
+                continue
+
+            nx = -dy / length
+            ny = dx / length
+
+            gate_len = 16.0
+            p_a = QPointF(p0.x() + nx * gate_len, p0.y() + ny * gate_len)
+            p_b = QPointF(p0.x() - nx * gate_len, p0.y() - ny * gate_len)
+
+            # Brilho / Halo do portal
+            halo_pen = QPen(QColor(gate_color))
+            halo_pen.setWidth(5)
+            c = QColor(gate_color)
+            c.setAlpha(60)
+            halo_pen.setColor(c)
+            painter.setPen(halo_pen)
+            painter.drawLine(p_a, p_b)
+
+            # Linha central do portal
+            gate_pen = QPen(gate_color, 2, Qt.SolidLine)
+            painter.setPen(gate_pen)
+            painter.drawLine(p_a, p_b)
+
+            # Placa indicativa do portal
+            lbl_pos = QPointF(p0.x() + nx * (gate_len + 14), p0.y() + ny * (gate_len + 14))
+            tag_rect = QRectF(lbl_pos.x() - 20, lbl_pos.y() - 9, 40, 18)
+
+            painter.setPen(QPen(gate_color, 1))
+            painter.setBrush(QColor(T.BG_INSET))
+            painter.drawRoundedRect(tag_rect, 3, 3)
+
+            painter.setPen(gate_color)
+            painter.drawText(tag_rect, Qt.AlignCenter, label)
+
     def _draw_overlay_legend(self, painter: QPainter):
         painter.setFont(QFont(T.FONT_UI, 8))
         modes_info = {
@@ -895,6 +1006,7 @@ class TrackMapProWidget(QWidget):
             "speed": "Modo: Heatmap de Velocidade (Azul = Lento, Vermelho = Rápido)",
             "gear": "Modo: Marchas (1ª a 7ª)",
             "delta": "Modo: Delta vs Referência (Verde = Ganhando, Vermelho = Perdendo)",
+            "micro_sectors": "Modo: Micro-setores F1 (Roxo = Recorde, Verde = Ganho, Amarelo = Perda, Ciano = Neutro)",
             "single": "Modo: Traçado Limpo",
         }
         mode_text = modes_info.get(self.color_mode, "")
@@ -1065,6 +1177,420 @@ class PlaybackController(QFrame):
 
 
 # ---------------------------------------------------------------------------
+# Widgets de Setores e Micro-setores (Estilo F1 Broadcast & MoTeC i2)
+# ---------------------------------------------------------------------------
+class MicroSectorStripWidget(QWidget):
+    """
+    Barra segmentada de micro-setores estilo Fórmula 1 Broadcast (LED Strip).
+    Desenha 8 pastilhas/pills com cantos arredondados, preenchidas pela cor
+    de status (Roxo = Recorde/Melhor, Verde = Ganho, Amarelo = Perda, Ciano = Neutro).
+    O micro-setor ativo sob inspeção pulsa com contorno branco e marcador iluminado.
+    """
+    sig_micro_clicked = pyqtSignal(float)
+
+    def __init__(self, sector_index: int = 0, parent=None):
+        super().__init__(parent)
+        self.sector_index = sector_index
+        self.micro_sectors: List[sa.MicroSectorInfo] = []
+        self.active_micro_idx: int = -1
+        self.hovered_idx: int = -1
+        self.setFixedHeight(18)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_micro_sectors(self, micros: List[sa.MicroSectorInfo]):
+        self.micro_sectors = [m for m in micros if m.sector_index == self.sector_index]
+        self.update()
+
+    def set_active_micro(self, active_global_idx: int):
+        if self.active_micro_idx != active_global_idx:
+            self.active_micro_idx = active_global_idx
+            self.update()
+
+    def mouseMoveEvent(self, event):
+        if not self.micro_sectors:
+            return
+        w = self.width()
+        n = len(self.micro_sectors)
+        idx = int((event.x() / max(1, w)) * n)
+        idx = max(0, min(n - 1, idx))
+        if idx != self.hovered_idx:
+            self.hovered_idx = idx
+            m = self.micro_sectors[idx]
+            delta_txt = m.formatted_delta if m.delta_s is not None else "-- (solo)"
+            ref_txt = f"Tempo Ref:   {m.ref_time_s:.3f} s\n" if m.ref_time_s else ""
+            self.setToolTip(
+                f"Micro-setor #{m.index + 1} ({m.sector_name}) · {m.start_m:.0f}m a {m.end_m:.0f}m\n"
+                f"Tempo Volta: {m.formatted_time}\n"
+                f"{ref_txt}"
+                f"Delta:       {delta_txt}\n"
+                f"V. Média:    {m.avg_speed:.1f} km/h (Mín: {m.min_speed:.0f} / Máx: {m.max_speed:.0f})"
+            )
+            self.update()
+
+    def leaveEvent(self, event):
+        self.hovered_idx = -1
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.micro_sectors:
+            w = self.width()
+            n = len(self.micro_sectors)
+            idx = int((event.x() / max(1, w)) * n)
+            idx = max(0, min(n - 1, idx))
+            target_dist = self.micro_sectors[idx].start_m
+            self.sig_micro_clicked.emit(target_dist)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        n = len(self.micro_sectors)
+        if n == 0:
+            n = 8
+            w_total = self.width()
+            gap = 3.0
+            pill_w = (w_total - (n - 1) * gap) / n
+            for i in range(n):
+                rect = QRectF(i * (pill_w + gap), 2, pill_w, self.height() - 4)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor("#243142"))
+                painter.drawRoundedRect(rect, 2.5, 2.5)
+            return
+
+        w_total = self.width()
+        gap = 3.0
+        pill_w = max(4.0, (w_total - (n - 1) * gap) / n)
+        h = self.height() - 4
+
+        for i, m in enumerate(self.micro_sectors):
+            x = i * (pill_w + gap)
+            rect = QRectF(x, 2, pill_w, h)
+            is_active = (m.index == self.active_micro_idx)
+            is_hovered = (i == self.hovered_idx)
+
+            base_color = QColor(m.color)
+            if is_hovered:
+                base_color = base_color.lighter(125)
+
+            grad = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+            grad.setColorAt(0.0, base_color.lighter(115))
+            grad.setColorAt(1.0, base_color.darker(110))
+
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(grad))
+            painter.drawRoundedRect(rect, 2.5, 2.5)
+
+            if is_active:
+                painter.setPen(QPen(QColor("#ffffff"), 2.0))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRoundedRect(rect.adjusted(-1, -1, 1, 1), 3.0, 3.0)
+
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor("#ffffff"))
+                painter.drawEllipse(QPointF(x + pill_w / 2.0, 3.0), 1.5, 1.5)
+
+
+class SectorCardWidget(QFrame):
+    """
+    Cartão individual de Setor oficial (S1, S2, S3) no estilo broadcast.
+    Apresenta nome do setor, tempo cravado, delta vs referência e a barra LED de micro-setores.
+    """
+    sig_micro_clicked = pyqtSignal(float)
+
+    def __init__(self, sector_index: int, title: str, parent=None):
+        super().__init__(parent)
+        self.sector_index = sector_index
+        self.title = title
+
+        self.setStyleSheet(f"""
+            SectorCardWidget {{
+                background-color: {T.BG_INSET};
+                border: 1px solid {T.BORDER};
+                border-radius: 4px;
+            }}
+        """)
+        self.setFixedHeight(68)
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 4, 8, 4)
+        root.setSpacing(2)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(6)
+
+        self.lbl_tag = QLabel(self.title)
+        self.lbl_tag.setFont(QFont(T.FONT_UI, 8, QFont.Bold))
+        self.lbl_tag.setStyleSheet(f"""
+            color: #ffffff;
+            background-color: {T.BG_HEADER};
+            padding: 2px 6px;
+            border-radius: 2px;
+            border: 1px solid {T.BORDER};
+        """)
+        top_row.addWidget(self.lbl_tag)
+
+        self.lbl_time = QLabel("--.--- s")
+        self.lbl_time.setFont(QFont(T.FONT_MONO, 12, QFont.Bold))
+        self.lbl_time.setStyleSheet("color: #ffffff;")
+        top_row.addWidget(self.lbl_time)
+
+        top_row.addStretch()
+
+        self.lbl_delta = QLabel("--")
+        self.lbl_delta.setFont(QFont(T.FONT_MONO, 10, QFont.Bold))
+        self.lbl_delta.setStyleSheet(f"color: {T.TXT_UNIT};")
+        top_row.addWidget(self.lbl_delta)
+
+        root.addLayout(top_row)
+
+        self.strip = MicroSectorStripWidget(self.sector_index)
+        self.strip.sig_micro_clicked.connect(self.sig_micro_clicked)
+        root.addWidget(self.strip)
+
+    def update_sector(self, sector: Optional[sa.SectorInfo], micros: List[sa.MicroSectorInfo]):
+        if sector is None:
+            self.lbl_time.setText("--.--- s")
+            self.lbl_delta.setText("--")
+            self.lbl_delta.setStyleSheet(f"color: {T.TXT_UNIT};")
+            self.strip.set_micro_sectors([])
+            return
+
+        self.lbl_time.setText(sector.formatted_time)
+        if sector.delta_s is not None:
+            sign = "+" if sector.delta_s >= 0 else ""
+            self.lbl_delta.setText(f"{sign}{sector.delta_s:.3f} s")
+            if sector.status == "purple":
+                self.lbl_delta.setStyleSheet("color: #d500f9; font-weight: bold;")
+                self.lbl_tag.setStyleSheet("color: #000000; background-color: #d500f9; font-weight: bold; border-radius: 2px; padding: 2px 6px;")
+            elif sector.status == "green":
+                self.lbl_delta.setStyleSheet("color: #00e676; font-weight: bold;")
+                self.lbl_tag.setStyleSheet("color: #000000; background-color: #00e676; font-weight: bold; border-radius: 2px; padding: 2px 6px;")
+            elif sector.status == "yellow":
+                self.lbl_delta.setStyleSheet("color: #ffd600; font-weight: bold;")
+                self.lbl_tag.setStyleSheet("color: #000000; background-color: #ffd600; font-weight: bold; border-radius: 2px; padding: 2px 6px;")
+            else:
+                self.lbl_delta.setStyleSheet(f"color: {T.TXT_VALUE};")
+                self.lbl_tag.setStyleSheet(f"color: #ffffff; background-color: {T.BG_HEADER}; border: 1px solid {T.BORDER}; border-radius: 2px; padding: 2px 6px;")
+        else:
+            self.lbl_delta.setText("SOLO")
+            self.lbl_delta.setStyleSheet(f"color: {T.TXT_UNIT};")
+            self.lbl_tag.setStyleSheet(f"color: #ffffff; background-color: {T.BG_HEADER}; border: 1px solid {T.BORDER}; border-radius: 2px; padding: 2px 6px;")
+
+        self.strip.set_micro_sectors(micros)
+
+
+class SectorsRibbonWidget(QFrame):
+    """
+    Banner de Setores e Micro-setores completo (F1 Broadcast Style Ribbon).
+    Contém S1, S2, S3 e um painel de Resumo com Volta Ideal Teórica.
+    """
+    sig_seek_distance = pyqtSignal(float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(f"""
+            SectorsRibbonWidget {{
+                background-color: {T.BG_PANEL};
+                border: 1px solid {T.BORDER};
+                border-radius: 4px;
+            }}
+        """)
+        self.setFixedHeight(76)
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QHBoxLayout(self)
+        root.setContentsMargins(6, 4, 6, 4)
+        root.setSpacing(6)
+
+        self.card_s1 = SectorCardWidget(0, "S1")
+        self.card_s1.sig_micro_clicked.connect(self.sig_seek_distance)
+        root.addWidget(self.card_s1, stretch=3)
+
+        self.card_s2 = SectorCardWidget(1, "S2")
+        self.card_s2.sig_micro_clicked.connect(self.sig_seek_distance)
+        root.addWidget(self.card_s2, stretch=3)
+
+        self.card_s3 = SectorCardWidget(2, "S3")
+        self.card_s3.sig_micro_clicked.connect(self.sig_seek_distance)
+        root.addWidget(self.card_s3, stretch=3)
+
+        self.summary_box = QFrame()
+        self.summary_box.setStyleSheet(f"""
+            QFrame {{
+                background-color: {T.BG_INSET};
+                border: 1px solid {T.BORDER};
+                border-radius: 4px;
+            }}
+        """)
+        self.summary_box.setFixedWidth(240)
+        box_lay = QVBoxLayout(self.summary_box)
+        box_lay.setContentsMargins(8, 4, 8, 4)
+        box_lay.setSpacing(1)
+
+        row_top = QHBoxLayout()
+        lbl_tot_title = QLabel("VOLTA IDEAL TEÓRICA")
+        lbl_tot_title.setFont(T.f_title(7))
+        lbl_tot_title.setStyleSheet(f"color: {T.TXT_TITLE};")
+        row_top.addWidget(lbl_tot_title)
+
+        self.lbl_ideal_gain = QLabel("")
+        self.lbl_ideal_gain.setFont(QFont(T.FONT_MONO, 8, QFont.Bold))
+        self.lbl_ideal_gain.setStyleSheet("color: #d500f9;")
+        row_top.addStretch()
+        row_top.addWidget(self.lbl_ideal_gain)
+        box_lay.addLayout(row_top)
+
+        row_mid = QHBoxLayout()
+        self.lbl_ideal_time = QLabel("--:--.---")
+        self.lbl_ideal_time.setFont(QFont(T.FONT_MONO, 12, QFont.Bold))
+        self.lbl_ideal_time.setStyleSheet("color: #d500f9;")
+        row_mid.addWidget(self.lbl_ideal_time)
+
+        self.lbl_total_delta = QLabel("Delta: --")
+        self.lbl_total_delta.setFont(QFont(T.FONT_MONO, 9, QFont.Bold))
+        self.lbl_total_delta.setStyleSheet(f"color: {T.TXT_UNIT};")
+        row_mid.addStretch()
+        row_mid.addWidget(self.lbl_total_delta)
+        box_lay.addLayout(row_mid)
+
+        self.lbl_micro_status = QLabel("⚡ 24 Micro-setores · Clique para navegar")
+        self.lbl_micro_status.setFont(QFont(T.FONT_UI, 7))
+        self.lbl_micro_status.setStyleSheet("color: #00e5ff;")
+        box_lay.addWidget(self.lbl_micro_status)
+
+        root.addWidget(self.summary_box, stretch=0)
+
+    def update_analysis(self, analysis: Optional[sa.LapSectorAnalysis]):
+        if analysis is None or not analysis.sectors:
+            self.card_s1.update_sector(None, [])
+            self.card_s2.update_sector(None, [])
+            self.card_s3.update_sector(None, [])
+            self.lbl_ideal_time.setText("--:--.---")
+            self.lbl_ideal_gain.setText("")
+            self.lbl_total_delta.setText("Delta: --")
+            return
+
+        s1 = analysis.get_sector(0)
+        s2 = analysis.get_sector(1)
+        s3 = analysis.get_sector(2)
+
+        self.card_s1.update_sector(s1, analysis.micro_sectors)
+        self.card_s2.update_sector(s2, analysis.micro_sectors)
+        self.card_s3.update_sector(s3, analysis.micro_sectors)
+
+        if analysis.theoretical_best_s > 0:
+            mins = int(analysis.theoretical_best_s // 60)
+            secs = analysis.theoretical_best_s % 60
+            self.lbl_ideal_time.setText(f"{mins}:{secs:06.3f}")
+            if analysis.ideal_gain_s > 0.005:
+                self.lbl_ideal_gain.setText(f"Potencial: -{analysis.ideal_gain_s:.3f}s")
+            else:
+                self.lbl_ideal_gain.setText("Ótimo!")
+        else:
+            self.lbl_ideal_time.setText("--:--.---")
+            self.lbl_ideal_gain.setText("")
+
+        if analysis.total_delta_s is not None:
+            sign = "+" if analysis.total_delta_s >= 0 else ""
+            color = "#00e676" if analysis.total_delta_s < -0.01 else ("#ff1744" if analysis.total_delta_s > 0.01 else T.TXT_VALUE)
+            self.lbl_total_delta.setText(f"Delta: {sign}{analysis.total_delta_s:.3f} s")
+            self.lbl_total_delta.setStyleSheet(f"color: {color}; font-weight: bold;")
+        else:
+            self.lbl_total_delta.setText("Delta: -- (solo)")
+            self.lbl_total_delta.setStyleSheet(f"color: {T.TXT_UNIT};")
+
+    def set_active_micro(self, active_global_idx: int):
+        self.card_s1.strip.set_active_micro(active_global_idx)
+        self.card_s2.strip.set_active_micro(active_global_idx)
+        self.card_s3.strip.set_active_micro(active_global_idx)
+
+
+class MicroSectorTableWidget(QTableWidget):
+    """
+    Tabela completa com os 24 micro-setores da volta (Splits de alta resolução).
+    Exibe número, setor, extensão, tempo atual, tempo ref, delta e velocidades.
+    """
+    sig_micro_clicked = pyqtSignal(float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setColumnCount(8)
+        self.setHorizontalHeaderLabels([
+            "Split", "Setor", "Trecho (m)", "Tempo", "Tempo Ref", "Delta", "V. Média", "V. Mín/Máx"
+        ])
+        self.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
+        self.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {T.BG_INSET}; color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER}; font-size: 11px;
+            }}
+            QHeaderView::section {{
+                background-color: {T.BG_HEADER}; color: {T.TXT_TITLE};
+                border: none; padding: 4px; font-size: 11px;
+            }}
+            QTableWidget::item:selected {{
+                background-color: {T.BG_HEADER}; color: #00e5ff;
+            }}
+        """)
+        self.itemClicked.connect(self._on_item_clicked)
+
+    def populate(self, analysis: Optional[sa.LapSectorAnalysis]):
+        self.setRowCount(0)
+        if not analysis or not analysis.micro_sectors:
+            return
+
+        for m in analysis.micro_sectors:
+            row = self.rowCount()
+            self.insertRow(row)
+
+            split_str = f"M{m.index + 1:02d}"
+            sec_str = m.sector_name
+            range_str = f"{m.start_m:.0f}–{m.end_m:.0f}"
+            time_str = f"{m.time_s:.3f} s"
+            ref_str = f"{m.ref_time_s:.3f} s" if m.ref_time_s is not None else "--"
+            delta_str = m.formatted_delta if m.delta_s is not None else "--"
+            avg_spd_str = f"{m.avg_speed:.0f} km/h"
+            min_max_str = f"{m.min_speed:.0f} / {m.max_speed:.0f}"
+
+            item_split = QTableWidgetItem(split_str)
+            item_split.setData(Qt.UserRole, m.start_m)
+            item_sec = QTableWidgetItem(sec_str)
+            item_range = QTableWidgetItem(range_str)
+            item_time = QTableWidgetItem(time_str)
+            item_ref = QTableWidgetItem(ref_str)
+            item_delta = QTableWidgetItem(delta_str)
+            item_delta.setForeground(QColor(m.color))
+            item_avg = QTableWidgetItem(avg_spd_str)
+            item_minmax = QTableWidgetItem(min_max_str)
+
+            for col, it in enumerate([item_split, item_sec, item_range, item_time,
+                                      item_ref, item_delta, item_avg, item_minmax]):
+                it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.setItem(row, col, it)
+
+    def _on_item_clicked(self, item):
+        row = item.row()
+        split_item = self.item(row, 0)
+        if split_item:
+            dist_m = split_item.data(Qt.UserRole)
+            if dist_m is not None:
+                self.sig_micro_clicked.emit(float(dist_m))
+
+
+# ---------------------------------------------------------------------------
 # Tabela de Análise Curva a Curva
 # ---------------------------------------------------------------------------
 class CornerTableWidget(QTableWidget):
@@ -1182,6 +1708,9 @@ class TelemetryStudioWindow(QMainWindow):
         self.corner_map: Optional[ca.CornerMap] = None
         self.corner_metrics: List[ca.CornerMetrics] = []
         self.corner_comparisons: List[ca.CornerComparison] = []
+
+        self.sector_analysis: Optional[sa.LapSectorAnalysis] = None
+        self.sector_lines: Dict[str, Tuple[pg.InfiniteLine, pg.InfiniteLine]] = {}
 
         self.setWindowTitle("ApexView — Telemetria Ponto a Ponto (MoTeC Telemetry Studio)")
         self.resize(1500, 920)
@@ -1316,6 +1845,7 @@ class TelemetryStudioWindow(QMainWindow):
         self.combo_heat = QComboBox()
         self.combo_heat.addItem("🛑 Freio & Acelerador", "brake_throttle")
         self.combo_heat.addItem("⚡ Heatmap Velocidade", "speed")
+        self.combo_heat.addItem("🏁 Micro-setores (F1)", "micro_sectors")
         self.combo_heat.addItem("🔢 Marchas", "gear")
         self.combo_heat.addItem("▲ Delta vs Referência", "delta")
         self.combo_heat.addItem("Linha Simples", "single")
@@ -1342,6 +1872,11 @@ class TelemetryStudioWindow(QMainWindow):
 
         layout.addLayout(top_bar)
 
+        # Ribbon de Setores e Micro-setores (Estilo F1 Broadcast)
+        self.sectors_ribbon = SectorsRibbonWidget()
+        self.sectors_ribbon.sig_seek_distance.connect(self._on_micro_clicked)
+        layout.addWidget(self.sectors_ribbon)
+
         center_split = QSplitter(Qt.Horizontal)
 
         # 1. Mapa Interativo
@@ -1362,10 +1897,42 @@ class TelemetryStudioWindow(QMainWindow):
         self.hud = PointInspectorWidget()
         bottom_box.addWidget(self.hud, 2)
 
+        # Abas da Direita: Análise Curva a Curva & Micro-setores (24 Splits)
+        self.tables_tabs = QTabWidget()
+        self.tables_tabs.setFixedWidth(460)
+        self.tables_tabs.setStyleSheet(f"""
+            QTabWidget::pane {{
+                border: 1px solid {T.BORDER};
+                background-color: {T.BG_INSET};
+            }}
+            QTabBar::tab {{
+                background-color: {T.BG_HEADER};
+                color: {T.TXT_UNIT};
+                padding: 4px 10px;
+                font-weight: bold;
+                font-size: 11px;
+                border: 1px solid {T.BORDER};
+                border-bottom: none;
+            }}
+            QTabBar::tab:selected {{
+                background-color: #00e5ff;
+                color: #000000;
+            }}
+            QTabBar::tab:hover:!selected {{
+                background-color: {T.BG_PANEL};
+                color: #ffffff;
+            }}
+        """)
+
         self.corner_table = CornerTableWidget()
         self.corner_table.sig_corner_clicked.connect(self._on_corner_clicked)
-        self.corner_table.setFixedWidth(440)
-        bottom_box.addWidget(self.corner_table, 1)
+
+        self.micro_table = MicroSectorTableWidget()
+        self.micro_table.sig_micro_clicked.connect(self._on_micro_clicked)
+
+        self.tables_tabs.addTab(self.corner_table, "🏁 Curvas")
+        self.tables_tabs.addTab(self.micro_table, "⚡ Micro-setores (24)")
+        bottom_box.addWidget(self.tables_tabs, 1)
 
         layout.addLayout(bottom_box)
 
@@ -1409,6 +1976,15 @@ class TelemetryStudioWindow(QMainWindow):
                                      pen=pg.mkPen("#ffffff", width=1.2))
             p.addItem(cursor)
             self.cursors[key] = cursor
+
+            s1_line = pg.InfiniteLine(angle=90, movable=False,
+                                      pen=pg.mkPen("#00e5ff", width=1.0, style=Qt.DashLine))
+            s2_line = pg.InfiniteLine(angle=90, movable=False,
+                                      pen=pg.mkPen("#ffd600", width=1.0, style=Qt.DashLine))
+            p.addItem(s1_line)
+            p.addItem(s2_line)
+            self.sector_lines[key] = (s1_line, s2_line)
+
             self.plots[key] = p
             p.scene().sigMouseMoved.connect(self._make_chart_mouse_handler(p))
             layout.addWidget(p)
@@ -1476,6 +2052,17 @@ class TelemetryStudioWindow(QMainWindow):
         if not corner_phrase:
             corner_phrase = "Reta"
 
+        # Lookup do micro-setor e setor atual
+        sector_phrase = ""
+        micro_delta_str = ""
+        if self.sector_analysis and self.sector_analysis.micro_sectors:
+            m_idx, m_info = sa.get_micro_sector_at(self.sector_analysis, cur_dist)
+            if m_info:
+                self.sectors_ribbon.set_active_micro(m_idx)
+                sector_phrase = f"{m_info.sector_name} · Micro {m_info.index + 1:02d}/24"
+                if m_info.delta_s is not None:
+                    micro_delta_str = f"Δ {m_info.formatted_delta}"
+
         hud_data = {
             "dist": cur_dist,
             "tot_dist": tot_dist,
@@ -1491,6 +2078,8 @@ class TelemetryStudioWindow(QMainWindow):
             "lon_g": lon_g,
             "trail_g": trail,
             "corner_phrase": corner_phrase,
+            "sector_phrase": sector_phrase,
+            "micro_delta_str": micro_delta_str,
         }
         self.hud.update_point(hud_data)
         self.playback.update_display(idx)
@@ -1515,6 +2104,12 @@ class TelemetryStudioWindow(QMainWindow):
             idx = min(bisect.bisect_left(distances, dist_m), len(distances) - 1)
             self._on_point_seek(idx)
 
+    def _on_micro_clicked(self, dist_m: float):
+        distances = self.current_tel.get("distance") or []
+        if len(distances) >= 2:
+            idx = min(bisect.bisect_left(distances, dist_m), len(distances) - 1)
+            self._on_point_seek(idx)
+
     # -- Redesenho dos Gráficos ---------------------------------------------
 
     def redraw_charts(self):
@@ -1522,6 +2117,9 @@ class TelemetryStudioWindow(QMainWindow):
             p.clear()
         for key, c in self.cursors.items():
             self.plots[key].addItem(c)
+        for key, (s1_l, s2_l) in self.sector_lines.items():
+            self.plots[key].addItem(s1_l)
+            self.plots[key].addItem(s2_l)
 
         if not self.current_tel:
             return
@@ -1574,6 +2172,14 @@ class TelemetryStudioWindow(QMainWindow):
             if len(deltas) >= 2:
                 plot_delta.plot(x[:len(deltas)], deltas[:n], pen=pg.mkPen(LAP_COLOR_MAIN, width=1.5))
         plot_delta.addLine(y=0, pen=pg.mkPen("#666666", style=Qt.DashLine))
+
+        # Posiciona as linhas verticais de limites de setores S1 e S2
+        if self.sector_analysis and len(self.sector_analysis.sectors) >= 2:
+            s1_pos = self.sector_analysis.sectors[0].end_m
+            s2_pos = self.sector_analysis.sectors[1].end_m
+            for s1_l, s2_l in self.sector_lines.values():
+                s1_l.setValue(s1_pos)
+                s2_l.setValue(s2_pos)
 
     # -- Seleção de Voltas e Dados ------------------------------------------
 
@@ -1660,6 +2266,17 @@ class TelemetryStudioWindow(QMainWindow):
             self.corner_metrics = []
 
         self._populate_ref_combos()
+
+        # Análise de Setores e Micro-setores
+        best_rec = self.library.best_lap(track, car)
+        best_sec_s = [ms / 1000.0 for ms in best_rec.sector_times_ms] if (best_rec and best_rec.sector_times_ms) else None
+        self.sector_analysis = sa.analyze_sectors_and_micro(
+            self.current_tel, self.ref_tel, num_micro_per_sector=8,
+            best_sector_times_s=best_sec_s
+        )
+        self.sectors_ribbon.update_analysis(self.sector_analysis)
+        self.micro_table.populate(self.sector_analysis)
+        self.track_map.set_sector_analysis(self.sector_analysis)
         self.track_map.set_lap_data(self.current_tel, self.corner_map, self.corner_metrics)
         self.corner_table.populate(self.corner_metrics, self.corner_comparisons,
                                    speeds=self.current_tel.get("speed"), distances=distances)
@@ -1709,6 +2326,15 @@ class TelemetryStudioWindow(QMainWindow):
             if "delta" in self.current_tel:
                 del self.current_tel["delta"]
 
+        best_rec = self.library.best_lap(self.current_track, self.current_car)
+        best_sec_s = [ms / 1000.0 for ms in best_rec.sector_times_ms] if (best_rec and best_rec.sector_times_ms) else None
+        self.sector_analysis = sa.analyze_sectors_and_micro(
+            self.current_tel, self.ref_tel, num_micro_per_sector=8,
+            best_sector_times_s=best_sec_s
+        )
+        self.sectors_ribbon.update_analysis(self.sector_analysis)
+        self.micro_table.populate(self.sector_analysis)
+        self.track_map.set_sector_analysis(self.sector_analysis)
         self.track_map.set_reference_lap_data(self.ref_tel)
         self.corner_table.populate(self.corner_metrics, self.corner_comparisons,
                                    speeds=self.current_tel.get("speed"), distances=self.current_tel.get("distance"))
@@ -1760,12 +2386,13 @@ class TelemetryStudioWindow(QMainWindow):
         tel = {
             "times": [], "distance": [], "speed": [], "gas": [], "brake": [],
             "steer": [], "gear": [], "rpm": [], "car_x": [], "car_z": [],
-            "g_lat": [], "g_lon": []
+            "g_lat": [], "g_lon": [], "sector": []
         }
 
         pts = len(_MOCK_TRACK_PATH)
         for i in range(pts):
             p = i / float(max(1, pts - 1))
+            sec_idx = 0 if p < 0.3333 else (1 if p < 0.6667 else 2)
             gas, brk, spd, steer = _track_profile(p)
             gear, rpm = _gear_for_speed(spd, braking=(brk > 0.1))
             x, z = _MOCK_TRACK_PATH[i]
@@ -1787,10 +2414,12 @@ class TelemetryStudioWindow(QMainWindow):
             tel["car_z"].append(z)
             tel["g_lat"].append(lat_g)
             tel["g_lon"].append(lon_g)
+            tel["sector"].append(sec_idx)
 
         demo_rec = LapRecord(
             lap_id="demo_01", track=TRACK_NAME, car=CAR_NAME,
             lap_number=1, lap_time_str="1:32.500", lap_time_ms=92500,
+            sector_times_ms=[30800, 32900, 28800],
             valid=True, full_lap=True, points=pts
         )
 
@@ -1805,13 +2434,19 @@ class TelemetryStudioWindow(QMainWindow):
         else:
             self.corner_metrics = []
 
+        self.sector_analysis = sa.analyze_sectors_and_micro(
+            tel, None, num_micro_per_sector=8
+        )
+        self.sectors_ribbon.update_analysis(self.sector_analysis)
+        self.micro_table.populate(self.sector_analysis)
+        self.track_map.set_sector_analysis(self.sector_analysis)
         self.track_map.set_lap_data(tel, self.corner_map, self.corner_metrics)
         self.corner_table.populate(self.corner_metrics, speeds=tel.get("speed"), distances=tel.get("distance"))
         self.playback.set_total_points(self.track_map.total_points)
 
         self.lbl_session_title.setText(
             f"⚡ DEMO — {TRACK_NAME} · {CAR_NAME} · Volta 1 (1:32.500)")
-        self.lbl_status.setText("Volta demo carregada com sucesso. Explore o traçado e os controles.")
+        self.lbl_status.setText("Volta demo carregada com sucesso. Explore os setores, micro-setores e traçado.")
         self.redraw_charts()
         self._on_point_seek(0)
 

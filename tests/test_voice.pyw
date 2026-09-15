@@ -9,7 +9,7 @@ exatamente o que o piloto ouviria naquela situação — incluindo a severidade,
 que decide a prioridade na fila de voz. Frase escrita à mão na bancada envelhece
 e passa a mentir; estado montado, não.
 
-    python test_voice.pyw
+    python tests/test_voice.pyw
 """
 
 import os
@@ -23,8 +23,8 @@ from PyQt5.QtWidgets import (
     QSplitter, QVBoxLayout, QWidget,
 )
 
-# Garante import do pacote core
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Garante import do pacote core da raiz do repositório
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core.corner_analysis as ca
 from core.models import TelemetryState

@@ -1,6 +1,6 @@
 """
-main.pyw — Ponto de entrada do Dashboard de Telemetria do Assetto Corsa
-=======================================================================
+ApexView.pyw — Ponto de entrada do Dashboard de Telemetria do Assetto Corsa
+===========================================================================
 Fluxo de inicialização:
   1. AssettoCorsaTelemetryProvider — Abre a memória compartilhada do AC
   2. TelemetryEngine               — Thread a 60 Hz que chama get_state() e emite sinais Qt
@@ -52,12 +52,12 @@ def _install_crash_guard():
 #
 # Antes era preciso EDITAR ESTA LINHA para ligá-lo. Agora, em ordem de
 # precedência:
-#     python main.pyw --mock        (ou --no-mock, para forçar o jogo real)
-#     APEXVIEW_MOCK=1 python main.pyw
+#     python ApexView.pyw --mock    (ou --no-mock, para forçar o jogo real)
+#     APEXVIEW_MOCK=1 python ApexView.pyw
 #     "mock_mode": true             no config.json
 def _resolve_mock_mode(argv=None) -> bool:
     parser = argparse.ArgumentParser(
-        prog="main.pyw", add_help=True,
+        prog="ApexView.pyw", add_help=True,
         description="ApexView — dashboard de telemetria para Assetto Corsa")
     grupo = parser.add_mutually_exclusive_group()
     grupo.add_argument("--mock", dest="mock", action="store_true", default=None,

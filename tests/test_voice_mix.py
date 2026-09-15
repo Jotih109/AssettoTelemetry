@@ -55,6 +55,7 @@ CHAVES_REAIS = [
     "tyre_hot:0", "tyre_cold", "tyre_cold:1", "brake_hot", "damage",
     "track_temp", "grip", "wind",
     "flag:AMARELA", "penalty", "cut",
+    "theoretical_ceiling",
 ]
 
 

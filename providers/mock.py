@@ -8,7 +8,7 @@ escala dinâmica dos gráficos sem precisar ter o Assetto Corsa instalado.
 
 Implementa a mesma interface TelemetryProvider usada pelo
 AssettoCorsaTelemetryProvider — basta trocar qual provider é injetado na
-Engine (ver MOCK_MODE em main.pyw).
+Engine (ver o modo simulação em ApexView.pyw).
 """
 
 import math

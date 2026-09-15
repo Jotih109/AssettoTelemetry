@@ -2,6 +2,7 @@ import json
 import os
 import copy
 from datetime import datetime
+from typing import Optional, List
 
 from core.models import TelemetryState
 from core.lap_library import (
@@ -871,6 +872,14 @@ class SessionManager:
         """`(pista, carro)` já limpos da sessão atual, ou `("", "")`."""
         return self._track_car
 
+    @property
+    def current_track(self) -> str:
+        return self._track_car[0]
+
+    @property
+    def current_car(self) -> str:
+        return self._track_car[1]
+
     def telemetry_for(self, entry) -> dict:
         """
         Telemetria de uma volta do histórico ou do catálogo.
@@ -1035,3 +1044,24 @@ class SessionManager:
         except OSError as e:
             print(f"[SessionManager] PB antigo importado, mas não consegui "
                   f"renomear o arquivo original: {e}")
+
+    def get_corner_bests_summary(self, track: str = "", car: str = "",
+                                 corners: Optional[List] = None,
+                                 track_length: float = 0.0,
+                                 signature: str = ""):
+        """
+        Resumo da Volta Ideal Teórica por Trechos para a pista e o carro.
+
+        `corners` e `track_length` não são enfeite: sem eles não há como saber
+        quanto o PB perdeu em cada curva, e o resumo volta sem tempo ideal
+        (ver `calculate_corner_bests_summary`). O PB sai do próprio catálogo.
+        """
+        trk = track or self.current_track
+        cr = car or self.current_car
+        if not trk or not cr:
+            return None
+        from core.corner_bests import CornerBestStore
+        store = CornerBestStore(self.library)
+        return store.get_summary(trk, cr, signature=signature,
+                                 corners=corners, track_length=track_length)
+

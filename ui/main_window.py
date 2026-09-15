@@ -132,6 +132,11 @@ class DashboardMainWindow(QMainWindow):
             prefer_male=bool(self.config.get("voice_prefer_male")))
         self._engineer_last_lap_count = 0
         self._engineer_clock = 0.0   # segundos desde o início da sessão
+        # Último resumo da Volta Ideal Teórica. Ele é refeito quando uma volta
+        # fecha — que é quando as melhores passagens podem ter mudado — e não a
+        # cada quadro: a conta lê o corner_bests.json do disco e a análise do
+        # PB, coisa que não cabe no laço da tela.
+        self._ideal_summary = None
         self._session_index_seen = 0
         self._laps_recorded_seen = 0
 
@@ -187,11 +192,13 @@ class DashboardMainWindow(QMainWindow):
         
         self.card_current = TopMetricCard("Volta atual", "--:--.---")
         self.card_best = TopMetricCard("Melhor volta", "--:--.---")
+        self.card_ideal = TopMetricCard("Ideal (Trechos)", "--:--.---")
         self.card_delta = TopMetricCard("Delta geral", "+0.00s", is_delta=True)
         self.card_sectors = SectorsCard()
         
         metrics_row.addWidget(self.card_current)
         metrics_row.addWidget(self.card_best)
+        metrics_row.addWidget(self.card_ideal)
         metrics_row.addWidget(self.card_delta)
         metrics_row.addWidget(self.card_sectors, stretch=1)
         
@@ -283,10 +290,10 @@ class DashboardMainWindow(QMainWindow):
         graph_header_row.addSpacing(4)
         graph_header_row.addWidget(self.btn_export, alignment=Qt.AlignVCenter)
 
-        self.btn_open_studio = QPushButton("TELEMETRIA (MAIN2)")
+        self.btn_open_studio = QPushButton("TELEMETRIA (PÓS)")
         self.btn_open_studio.setFont(T.f_title(8))
         self.btn_open_studio.setCursor(Qt.PointingHandCursor)
-        self.btn_open_studio.setToolTip("Abre a tela de telemetria ponto a ponto estilo MoTeC (main2.pyw)")
+        self.btn_open_studio.setToolTip("Abre a tela de telemetria ponto a ponto estilo MoTeC (ApexView_POS.pyw)")
         self.btn_open_studio.setStyleSheet(f"""
             QPushButton {{
                 background-color: {T.BG_INSET};
@@ -376,6 +383,7 @@ class DashboardMainWindow(QMainWindow):
             c.setAlpha(150)
             return pg.mkPen(color=c, width=2.5, style=Qt.DashLine)
 
+        self.curve_ghost_delta = self.plot_delta.plot(pen=_ghost_pen("#FF9100"))
         self.curve_ghost_speed = self.plot_speed.plot(pen=_ghost_pen(T.CH_SPEED))
         self.curve_ghost_gas = self.plot_pedals.plot(pen=_ghost_pen(T.CH_THROTTLE))
         self.curve_ghost_brake = self.plot_pedals.plot(pen=_ghost_pen(T.CH_BRAKE))
@@ -1149,8 +1157,7 @@ class DashboardMainWindow(QMainWindow):
         track, car = self.session_manager.track_car
         if not track or not self._corners:
             return
-        fonte = self._corner_map.source if self._corner_map else ""
-        assinatura = map_signature(self._corners, fonte)
+        assinatura = self._corner_map_signature()
         if self._coach_seed_signature == (track, car, assinatura):
             return
         self._coach_seed_signature = (track, car, assinatura)
@@ -1265,6 +1272,59 @@ class DashboardMainWindow(QMainWindow):
             linhas.append("As faixas nos gráficos acompanham a volta EM "
                           "ANDAMENTO, que é a desenhada.")
         self.analysis_tabs.setTabToolTip(0, "\n".join(linhas))
+
+    def _corner_map_signature(self) -> str:
+        """Assinatura do mapa de curvas em uso, a mesma gravada no corner_bests.json."""
+        if not self._corners:
+            return ""
+        fonte = self._corner_map.source if self._corner_map else ""
+        return map_signature(self._corners, fonte)
+
+    def _refresh_ideal_summary(self, state=None):
+        """
+        Recalcula o resumo da Volta Ideal Teórica e guarda em `_ideal_summary`.
+
+        Chamado quando uma volta fecha. O mapa de curvas e o comprimento da
+        pista vão junto porque sem eles não há tempo ideal — só o PB.
+        """
+        comprimento = (self._corner_track_length
+                       or getattr(state, "track_length", 0.0)
+                       or getattr(self._last_state, "track_length", 0.0))
+        try:
+            self._ideal_summary = self.session_manager.get_corner_bests_summary(
+                self.session_manager.current_track,
+                self.session_manager.current_car,
+                corners=self._corners,
+                track_length=comprimento,
+                signature=self._corner_map_signature(),
+            )
+        except Exception as e:
+            # Zerar em vez de manter o resumo anterior: um número velho aqui
+            # faria o engenheiro anunciar um teto que não vale mais.
+            self._ideal_summary = None
+            print(f"[Dashboard] Não consegui recalcular a ideal teórica: {e}")
+        return self._ideal_summary
+
+    def _update_ideal_corners_display(self, state=None):
+        """Atualiza o card do topo com a volta ideal teórica por trechos."""
+        if not hasattr(self, 'card_ideal'):
+            return
+        try:
+            summary = self._refresh_ideal_summary(state)
+            if summary and summary.ideal_time_s > 0:
+                self.card_ideal.set_value(summary.ideal_time_str)
+                if summary.delta_s > 0:
+                    self.card_ideal.setToolTip(
+                        f"Ideal Teórica (Trechos): {summary.ideal_time_str} "
+                        f"(Potencial na mesa: {summary.delta_str})"
+                    )
+                else:
+                    self.card_ideal.setToolTip(f"Ideal Teórica (Trechos): {summary.ideal_time_str}")
+            else:
+                self.card_ideal.set_value("--:--.---")
+                self.card_ideal.setToolTip("Ideal Teórica (Trechos): aguardando voltas/curvas gravadas")
+        except Exception:
+            pass
 
     # --- Faixas sombreadas das curvas sobre os gráficos --------------------
 
@@ -1552,6 +1612,20 @@ class DashboardMainWindow(QMainWindow):
         if avisos and self.engineer_panel.mode != EngineerPanel.MODE_MANUAL:
             self._engineer_emit(avisos, speak_limit=0)
 
+        # Teto teórico por trechos de curva. O card é atualizado primeiro: ele
+        # refaz o resumo, e o aviso de voz aproveita o mesmo número.
+        self._update_ideal_corners_display(state)
+        try:
+            summary = self._ideal_summary
+            if summary and summary.ideal_time_s > 0 and summary.total_corners >= 2:
+                ceiling_adv = self.engineer.announce_theoretical_ceiling(
+                    summary.ideal_time_s, self._engineer_clock
+                )
+                if ceiling_adv and self.engineer_panel.mode != EngineerPanel.MODE_MANUAL:
+                    self._engineer_emit([ceiling_adv], speak_limit=1)
+        except Exception as e:
+            print(f"[RaceEngineer] Erro ao anunciar teto teórico: {e}")
+
     def _engineer_live_tick(self, state):
         """
         Avisos com o carro na pista, quando o modo é 'Ao vivo'.
@@ -1563,6 +1637,16 @@ class DashboardMainWindow(QMainWindow):
         if self.engineer_panel.mode != EngineerPanel.MODE_LIVE:
             return
         advices = self.engineer.analyze_live(state, self._engineer_clock)
+
+        # Teto teórico: só o resumo já calculado quando a última volta fechou.
+        # Refazer a conta aqui custaria uma leitura de disco a cada tique.
+        summary = self._ideal_summary
+        if summary and summary.ideal_time_s > 0 and summary.total_corners >= 2:
+            ceiling_adv = self.engineer.announce_theoretical_ceiling(
+                summary.ideal_time_s, self._engineer_clock
+            )
+            if ceiling_adv:
+                advices.append(ceiling_adv)
 
         self.coach.set_track(self._corners, self._corner_track_length
                              or getattr(state, "track_length", 0.0))
@@ -1768,6 +1852,10 @@ class DashboardMainWindow(QMainWindow):
             best_time_str = self.session_manager.session_best_lap_ghost["metadata"].get("lap_time_str", "--:--.---") or "--:--.---"
         self.card_current.set_value(curr_time_str)
         self.card_best.set_value(best_time_str)
+
+        self._ideal_corners_frame_skip = (getattr(self, "_ideal_corners_frame_skip", 0) + 1) % 30
+        if self._ideal_corners_frame_skip == 0:
+            self._update_ideal_corners_display(state)
 
         # Auto-exporta uma imagem sempre que uma NOVA melhor volta é registrada
         if (AUTO_EXPORT_ON_BEST_LAP and self.auto_export_on_best
@@ -2222,6 +2310,7 @@ class DashboardMainWindow(QMainWindow):
             self.sidebar_panel.track_map_card.map_widget.set_base_trace(cx, cz)
 
     def _clear_ghost_curves(self):
+        self.curve_ghost_delta.setData([], [])
         self.curve_ghost_speed.setData([], [])
         self.curve_ghost_gas.setData([], [])
         self.curve_ghost_brake.setData([], [])
@@ -2259,6 +2348,7 @@ class DashboardMainWindow(QMainWindow):
                     arr += [0.0] * (n - len(arr))
                 return arr
 
+            self.curve_ghost_delta.setData(x_data, [0.0] * n)
             self.curve_ghost_speed.setData(x_data, channel("speed"))
             self.curve_ghost_gas.setData(x_data, channel("gas", 100.0))
             self.curve_ghost_brake.setData(x_data, channel("brake", 100.0))
@@ -2270,6 +2360,8 @@ class DashboardMainWindow(QMainWindow):
             )
         else:
             self._clear_ghost_curves()
+
+        self._update_ideal_corners_display()
 
         if hasattr(self, 'lap_selector') and self.lap_selector.combo.currentIndex() > 0:
             self.on_selected_lap_changed(self.lap_selector.combo.currentIndex())
@@ -2292,7 +2384,7 @@ class DashboardMainWindow(QMainWindow):
             self.plot_splitter.setSizes([part, part, part, total_h - (part * 3)])
 
     def on_open_studio_clicked(self):
-        """Abre a tela de telemetria ponto a ponto estilo MoTeC (main2.pyw)."""
+        """Abre a tela de telemetria ponto a ponto estilo MoTeC (ApexView_POS.pyw)."""
         from ui.telemetry_studio import TelemetryStudioWindow
         self._studio_win = TelemetryStudioWindow(self.session_manager.library)
         self._studio_win.show()

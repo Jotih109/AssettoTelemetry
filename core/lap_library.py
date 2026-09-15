@@ -158,6 +158,8 @@ class LapRecord:
     manual_save: bool = False
     #: Protegida da limpeza automática
     pinned: bool = False
+    #: Volta importada externamente (pacote .apex)
+    imported: bool = False
     #: Arquivo herdado de versão anterior (JSON solto, sem compressão)
     legacy: bool = False
 
@@ -250,6 +252,8 @@ class LapRecord:
             text += " ⚠"
         if self.pinned:
             text = "📌 " + text
+        if getattr(self, "imported", False):
+            text += " [importada]"
         if with_date and self.date_str:
             text += f"  ({self.date_str})"
         return text
@@ -312,7 +316,15 @@ def read_json_file(path: str):
     cada volta, e jogar fora sem deixar rastro atrapalha quem for investigar.
     """
     try:
-        opener = gzip.open if path.endswith(".gz") else open
+        is_gz = path.endswith(".gz") or path.endswith(".apex")
+        if not is_gz and os.path.exists(path):
+            try:
+                with open(path, 'rb') as test_f:
+                    if test_f.read(2) == b'\x1f\x8b':
+                        is_gz = True
+            except OSError:
+                pass
+        opener = gzip.open if is_gz else open
         with opener(path, 'rt', encoding='utf-8') as f:
             return json.load(f)
     except (OSError, ValueError, UnicodeDecodeError, EOFError) as e:
@@ -538,6 +550,7 @@ class LapLibrary:
             pit_lap=bool(meta.get("pit_lap", False)),
             manual_save=bool(meta.get("manual_save", False)),
             pinned=bool(meta.get("pinned", False)),
+            imported=bool(meta.get("imported", False)),
         )
 
     def _write_index(self, track: str, car: str, recs: List[LapRecord]) -> bool:
@@ -953,6 +966,158 @@ class LapLibrary:
             print(f"[LapLibrary] Falha ao exportar relatório: {e}")
             return False
 
+    def export_lap_file(self, track: str, car: str, rec: LapRecord,
+                        output_path: str) -> bool:
+        """
+        Empacota a telemetria .json.gz e os metadados do índice em um arquivo portátil
+        .apex (ou .lap.json.gz).
+        """
+        telemetry = self.load_telemetry(track, car, rec)
+        if not telemetry:
+            print(f"[LapLibrary] Telemetria não encontrada para volta {rec.lap_id}")
+            return False
+
+        if not (output_path.lower().endswith(".apex") or
+                output_path.lower().endswith(".json.gz") or
+                output_path.lower().endswith(".json")):
+            output_path += ".apex"
+
+        payload = {
+            "format": "apex_lap_package",
+            "schema_version": 1,
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+            "metadata": rec.to_dict(),
+            "telemetry": compact_telemetry(telemetry)
+        }
+
+        try:
+            parent = os.path.dirname(os.path.abspath(output_path))
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            blob = gzip.compress(
+                json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode("utf-8"),
+                compresslevel=6
+            )
+            return write_bytes_atomic(output_path, blob)
+        except Exception as e:
+            print(f"[LapLibrary] Erro ao exportar pacote .apex: {e}")
+            return False
+
+    def import_lap_file(self, file_path: str) -> Optional[LapRecord]:
+        """
+        Valida a integridade, descompacta os metadados, detecta pista e carro,
+        e salva a volta dentro da pasta correta em telemetry_data/<Pista>/<Carro>/laps/,
+        adicionando o registro ao index.json local com a flag 'imported': True e
+        marcando-a como protegida/pin (não sujeita à retenção automática).
+        """
+        if not os.path.isfile(file_path):
+            print(f"[LapLibrary] Arquivo de importação inexistente: {file_path}")
+            return None
+
+        data = read_json_file(file_path)
+        if not isinstance(data, dict):
+            print(f"[LapLibrary] Arquivo de volta inválido ou ilegível: {file_path}")
+            return None
+
+        if "metadata" in data and "telemetry" in data:
+            meta = data.get("metadata", {}) or {}
+            telemetry = data.get("telemetry", {}) or {}
+        elif "telemetry" in data:
+            meta = data.get("metadata", {}) or {}
+            telemetry = data.get("telemetry", {}) or {}
+        else:
+            print(f"[LapLibrary] Arquivo não possui bloco de telemetria: {file_path}")
+            return None
+
+        times = telemetry.get("times")
+        if not times or not isinstance(times, list) or len(times) < 5:
+            print(f"[LapLibrary] Telemetria sem amostras de tempo suficientes: {file_path}")
+            return None
+
+        from core.session_manager import parse_lap_time_ms
+
+        raw_track = str(meta.get("track") or "UnknownTrack")
+        raw_car = str(meta.get("car") or "UnknownCar")
+        track = clean_name(raw_track, "UnknownTrack")
+        car = clean_name(raw_car, "UnknownCar")
+
+        folder = self.folder_for(track, car)
+        laps_dir = os.path.join(folder, "laps")
+        os.makedirs(laps_dir, exist_ok=True)
+
+        now_str = datetime.now().strftime("%Y%m%d-%H%M%S")
+        lap_num = int(meta.get("lap_number", 0) or 0)
+        base_id = _SAFE_ID.sub("_", f"imp_{now_str}_L{lap_num:03d}" if lap_num else f"imp_{now_str}")
+        lap_id, rel_file = self._unique_lap_id(track, car, base_id)
+
+        lap_time_str = str(meta.get("lap_time_str") or "--:--.---")
+        sector_times_ms = list(meta.get("sector_times_ms", [0, 0, 0]))[:3]
+        if len(sector_times_ms) < 3:
+            sector_times_ms += [0] * (3 - len(sector_times_ms))
+
+        imported_meta = dict(meta)
+        imported_meta.update({
+            "track": track,
+            "car": car,
+            "lap_id": lap_id,
+            "lap_time_str": lap_time_str,
+            "sector_times_ms": sector_times_ms,
+            "timestamp": meta.get("timestamp") or datetime.now().isoformat(timespec="seconds"),
+            "lap_number": lap_num,
+            "session_id": str(meta.get("session_id") or "imported"),
+            "session_type": str(meta.get("session_type") or "Imported"),
+            "full_lap": bool(meta.get("full_lap", True)),
+            "valid": bool(meta.get("valid", True)),
+            "pit_lap": bool(meta.get("pit_lap", False)),
+            "manual_save": True,
+            "pinned": True,
+            "imported": True,
+        })
+
+        lap_payload = {
+            "metadata": imported_meta,
+            "telemetry": compact_telemetry(telemetry)
+        }
+
+        dest_file = os.path.join(folder, rel_file)
+        blob = gzip.compress(
+            json.dumps(lap_payload, ensure_ascii=False, separators=(',', ':')).encode("utf-8"),
+            compresslevel=6
+        )
+        if not write_bytes_atomic(dest_file, blob):
+            print(f"[LapLibrary] Falha ao salvar telemetria importada em {dest_file}")
+            return None
+
+        rec = LapRecord(
+            lap_id=lap_id,
+            file=rel_file.replace("\\", "/"),
+            track=track,
+            car=car,
+            session_id=imported_meta["session_id"],
+            session_type=imported_meta["session_type"],
+            lap_number=lap_num,
+            lap_time_str=lap_time_str,
+            lap_time_ms=parse_lap_time_ms(lap_time_str),
+            sector_times_ms=sector_times_ms,
+            timestamp=imported_meta["timestamp"],
+            points=len(times),
+            channels=sorted(k for k, v in telemetry.items() if isinstance(v, list) and v),
+            full_lap=imported_meta["full_lap"],
+            valid=imported_meta["valid"],
+            pit_lap=imported_meta["pit_lap"],
+            manual_save=True,
+            pinned=True,
+            imported=True,
+        )
+
+        recs = self.records(track, car)
+        recs.insert(0, rec)
+        self._write_index(track, car, recs)
+        self._telemetry_cache[self._cache_key(track, car, rec)] = lap_payload["telemetry"]
+        self._trim_cache()
+        print(f"[LapLibrary] Volta {lap_id} importada com sucesso para {track}/{car}")
+        return rec
+
     # -- manutenção ----------------------------------------------------------
 
     def set_pinned(self, track: str, car: str, lap_id: str,
@@ -1004,8 +1169,8 @@ class LapLibrary:
             return 0
 
         keep_ids = set()
-        # Fixadas e salvas à mão: intocáveis
-        keep_ids.update(r.lap_id for r in recs if r.pinned or r.manual_save)
+        # Fixadas, salvas à mão e importadas: intocáveis
+        keep_ids.update(r.lap_id for r in recs if r.pinned or r.manual_save or getattr(r, "imported", False))
         # As mais recentes (a lista já vem da mais nova para a mais velha)
         keep_ids.update(r.lap_id for r in recs[:pol.keep_recent])
         # As mais rápidas válidas e inteiras

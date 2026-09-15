@@ -22,8 +22,9 @@ antigo nem gravou.
 """
 
 import bisect
+import dataclasses
 import math
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Limiares das medidas
@@ -625,3 +626,186 @@ def line_deviation_m(lap: LapChannels, ref: LapChannels,
     if len(desvios) < 5:
         return None
     return _mean(desvios)
+
+
+# ---------------------------------------------------------------------------
+# Trail Braking (Transição Freio vs. Volante)
+# ---------------------------------------------------------------------------
+
+@dataclasses.dataclass
+class TrailBrakingAnalysis:
+    """Diagnóstico forense da fase de transição de trail braking de uma curva."""
+    corner_name: str = ""
+    corner_index: int = 0
+    start_m: float = 0.0
+    end_m: float = 0.0
+    has_trail: bool = False
+    coactivation_samples: int = 0
+    coactivation_duration_s: float = 0.0
+    coactivation_pct: float = 0.0         # % do tempo da fase de entrada com co-ativação
+    linearity_score: float = 0.0          # 0.0 a 100.0%
+    steer_at_brake_release_deg: float = 0.0
+    max_brake_during_turn: float = 0.0    # % (0..100)
+    anomalies: List[str] = dataclasses.field(default_factory=list)
+    steer_points: List[float] = dataclasses.field(default_factory=list) # Graus (|steer|)
+    brake_points: List[float] = dataclasses.field(default_factory=list) # % (0..100)
+    distance_points: List[float] = dataclasses.field(default_factory=list)
+
+
+def analyze_corner_trail_braking(
+    ch: LapChannels,
+    start_m: float,
+    end_m: float,
+    apex_m: Optional[float] = None,
+    corner_name: str = "",
+    corner_index: int = 0,
+    lookback_m: float = 80.0
+) -> Optional[TrailBrakingAnalysis]:
+    """
+    Analisa o Trail Braking durante a fase de entrada da curva (desde a aproximação
+    até o ápice ou fim da curva).
+
+    Identifica a fase de transição entre o início do esterçamento e o ponto de soltura
+    do freio (co-ativação de freio > 5% e ângulo de volante > 5°).
+    Calcula a linearidade da descompressão do freio versus o aumento do ângulo de volante.
+    Detecta anomalias como:
+      - "Freio largado em degrau antes do ápice"
+      - "Freio retido em linha reta sem rotação do volante"
+    """
+    if isinstance(ch, dict):
+        ch = LapChannels(ch)
+    if not (ch.distance and ch.brake and ch.steer and ch.times):
+        return None
+
+    window_start = max(0.0, start_m - lookback_m)
+    window_end = apex_m if (apex_m and apex_m > start_m) else (start_m + (end_m - start_m) * 0.6)
+    if window_end <= window_start:
+        window_end = end_m
+
+    i0, i1 = ch.window(window_start, window_end)
+    if i1 - i0 < 4:
+        return None
+
+    steers_deg = []
+    brakes_pct = []
+    dists = []
+    times = []
+
+    coactive_indices = []
+    max_brake_turn = 0.0
+    steer_at_release = 0.0
+
+    step_release_detected = False
+    straight_brake_samples = 0
+    total_braking_samples = 0
+
+    for i in range(i0, i1):
+        if i >= len(ch.steer) or i >= len(ch.brake) or i >= len(ch.times):
+            break
+
+        b = float(ch.brake[i])
+        st = abs(float(ch.steer[i]))
+        t = float(ch.times[i])
+        d = float(ch.distance[i]) if i < len(ch.distance) else 0.0
+
+        b_pct = b * 100.0
+        steers_deg.append(st)
+        brakes_pct.append(b_pct)
+        dists.append(d)
+        times.append(t)
+
+        if b > 0.05:
+            total_braking_samples += 1
+            if st <= 5.0:
+                straight_brake_samples += 1
+
+        # Co-ativação: freio > 5% (0.05) e |volante| > 5°
+        if b > 0.05 and st > 5.0:
+            coactive_indices.append(len(steers_deg) - 1)
+            if b_pct > max_brake_turn:
+                max_brake_turn = b_pct
+
+        # Detecção de degrau abrupto na descompressão (soltura brusca antes do ápice com volante virado)
+        if len(brakes_pct) >= 2:
+            prev_b = brakes_pct[-2]
+            prev_st = steers_deg[-2]
+            dt = t - times[-2] if len(times) >= 2 else 0.016
+            if dt > 0 and (prev_b - b_pct) > 28.0 and dt < 0.12 and prev_st > 5.0:
+                step_release_detected = True
+
+    # Ponto de soltura do freio (quando cai abaixo de 5%)
+    for idx in range(len(brakes_pct) - 1):
+        if brakes_pct[idx] >= 5.0 and brakes_pct[idx + 1] < 5.0:
+            steer_at_release = steers_deg[idx + 1]
+            break
+
+    n_samples = len(steers_deg)
+    has_trail = len(coactive_indices) >= 3
+    coact_dur = 0.0
+    if has_trail:
+        t_first = times[coactive_indices[0]]
+        t_last = times[coactive_indices[-1]]
+        coact_dur = max(0.0, t_last - t_first)
+
+    coact_pct = (len(coactive_indices) / n_samples * 100.0) if n_samples else 0.0
+
+    # Índice de linearidade da transição
+    linearity_score = 0.0
+    if has_trail and len(coactive_indices) >= 3:
+        sub_brakes = [brakes_pct[idx] for idx in coactive_indices]
+        sub_steers = [steers_deg[idx] for idx in coactive_indices]
+
+        mean_b = sum(sub_brakes) / len(sub_brakes)
+        mean_s = sum(sub_steers) / len(sub_steers)
+        var_b = sum((b - mean_b) ** 2 for b in sub_brakes)
+        var_s = sum((s - mean_s) ** 2 for s in sub_steers)
+        cov_bs = sum((sub_brakes[k] - mean_b) * (sub_steers[k] - mean_s) for k in range(len(sub_brakes)))
+
+        if var_b > 1e-4 and var_s > 1e-4:
+            r = cov_bs / math.sqrt(var_b * var_s)
+            if r < 0:
+                raw_score = abs(r) * 100.0
+            else:
+                raw_score = max(5.0, 50.0 - (r * 45.0))
+        else:
+            raw_score = 65.0
+
+        if step_release_detected:
+            raw_score *= 0.65
+
+        linearity_score = max(5.0, min(99.0, round(raw_score, 1)))
+    elif not has_trail:
+        linearity_score = 0.0
+
+    anomalies = []
+    if step_release_detected:
+        anomalies.append("Freio largado em degrau antes do ápice")
+
+    if total_braking_samples >= 8 and (straight_brake_samples / total_braking_samples) > 0.88 and not has_trail:
+        anomalies.append("Freio retido em linha reta sem rotação do volante")
+
+    if has_trail and linearity_score >= 80.0 and not step_release_detected:
+        anomalies.append("Transição suave e progressiva (Trail Braking ideal)")
+    elif has_trail and linearity_score < 50.0 and not anomalies:
+        anomalies.append("Descompressão de freio irregular durante o esterçamento")
+    elif not has_trail and not anomalies:
+        anomalies.append("Freada finalizada antes do início do esterçamento (Sem trail braking)")
+
+    return TrailBrakingAnalysis(
+        corner_name=corner_name or f"Curva {corner_index}",
+        corner_index=corner_index,
+        start_m=start_m,
+        end_m=end_m,
+        has_trail=has_trail,
+        coactivation_samples=len(coactive_indices),
+        coactivation_duration_s=round(coact_dur, 3),
+        coactivation_pct=round(coact_pct, 1),
+        linearity_score=linearity_score,
+        steer_at_brake_release_deg=round(steer_at_release, 1),
+        max_brake_during_turn=round(max_brake_turn, 1),
+        anomalies=anomalies,
+        steer_points=steers_deg,
+        brake_points=brakes_pct,
+        distance_points=dists,
+    )
+

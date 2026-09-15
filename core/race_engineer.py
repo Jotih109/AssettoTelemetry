@@ -167,6 +167,7 @@ COOLDOWNS_S = {
     "damage": 15.0, "last_lap": 60.0,
     "delta": 10.0, "sector": 3.0, "best_lap": 25.0,
     "track_temp": 120.0, "grip": 180.0, "wind": 180.0,
+    "theoretical_ceiling": 300.0,
 }
 
 #: Intervalo mínimo entre duas falas, para não metralhar o piloto.
@@ -277,6 +278,44 @@ class RaceEngineer:
 
     def mark_spoken(self, now: float):
         self._last_speak_at = now
+
+    def announce_theoretical_ceiling(self, ideal_time_s: float, now: float,
+                                    min_cooldown_s: float = 300.0) -> Optional[Advice]:
+        """
+        Fala sobre o teto teórico da pista somando as melhores passagens de curva:
+        'Somando suas melhores passagens de curva, seu teto atual nesta pista é X minutos e Y segundos.'
+        """
+        if ideal_time_s <= 0:
+            return None
+        last = self._last_said.get("theoretical_ceiling")
+        if last is not None and (now - last) < min_cooldown_s:
+            return None
+
+        m = int(ideal_time_s // 60)
+        s = int(round(ideal_time_s % 60))
+        if s >= 60:
+            s = 0
+            m += 1
+
+        if m > 0:
+            min_txt = "1 minuto" if m == 1 else f"{m} minutos"
+            seg_txt = "1 segundo" if s == 1 else f"{s} segundos"
+            text = f"Somando suas melhores passagens de curva, seu teto atual nesta pista é {min_txt} e {seg_txt}."
+        else:
+            seg_txt = "1 segundo" if s == 1 else f"{s} segundos"
+            text = f"Somando suas melhores passagens de curva, seu teto atual nesta pista é {seg_txt}."
+
+        self._mark("theoretical_ceiling", now)
+        return Advice(
+            key="theoretical_ceiling",
+            severity=INFO,
+            text=text,
+            detail=f"Teto teórico (trechos): {ideal_time_s:.3f} s",
+            kind="live",
+            time_at_stake=0.0,
+            ttl_s=20.0
+        )
+
 
     @staticmethod
     def pick_for_voice(advices: List[Advice], limit: int = 2) -> List[Advice]:

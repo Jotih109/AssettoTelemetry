@@ -25,10 +25,10 @@ from typing import Optional
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QSplitter, QPushButton, QTreeWidget, QTreeWidgetItem, QFileDialog,
-    QAbstractItemView, QComboBox, QMenu, QDialog, QTextEdit,
+    QAbstractItemView, QComboBox, QMenu, QDialog, QTextEdit, QTabWidget, QFrame,
 )
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor
+from PyQt5.QtGui import QColor, QFont
 import pyqtgraph as pg
 
 from core.lap_library import LapLibrary, LapRecord, RetentionPolicy
@@ -91,7 +91,37 @@ class LapAnalysisWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self._build_browser())
-        splitter.addWidget(self._build_charts())
+
+        self.tabs_main = QTabWidget()
+        self.tabs_main.setStyleSheet(f"""
+            QTabWidget::pane {{
+                border: 1px solid {T.BORDER};
+                background: {T.BG_PANEL};
+            }}
+            QTabBar::tab {{
+                background: {T.BG_INSET};
+                color: {T.TXT_LABEL};
+                padding: 6px 14px;
+                font-family: "{T.FONT_UI}";
+                font-size: 11px;
+                font-weight: bold;
+                border: 1px solid {T.BORDER};
+                border-bottom: none;
+            }}
+            QTabBar::tab:selected {{
+                background-color: #00e5ff;
+                color: #000000;
+            }}
+            QTabBar::tab:hover:!selected {{
+                background-color: {T.BG_HEADER};
+                color: #ffffff;
+            }}
+        """)
+        self.tabs_main.addTab(self._build_charts(), "🏁 TELEMETRIA & MAPA")
+        self.tabs_main.addTab(self._build_stint_view(), "⏱️ STINT & ESTRATÉGIA")
+        self.tabs_main.currentChanged.connect(self._on_main_tab_changed)
+
+        splitter.addWidget(self.tabs_main)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([360, 1040])
@@ -142,9 +172,9 @@ class LapAnalysisWindow(QMainWindow):
             f"color: {T.TXT_UNIT}; background: transparent; font-size: 11px;")
         layout.addWidget(self.lbl_status)
 
-        btn_studio = QPushButton("⚡ ESTÚDIO PRO (MAIN2)")
+        btn_studio = QPushButton("⚡ ESTÚDIO PRO (PÓS)")
         btn_studio.setCursor(Qt.PointingHandCursor)
-        btn_studio.setToolTip("Abre a estação de telemetria ponto a ponto estilo MoTeC (main2.pyw) com traçado interativo, frenagem e replay")
+        btn_studio.setToolTip("Abre a estação de telemetria ponto a ponto estilo MoTeC (ApexView_POS.pyw) com traçado interativo, frenagem e replay")
         btn_studio.clicked.connect(self.on_open_studio)
         btn_studio.setStyleSheet(f"""
             QPushButton {{
@@ -156,6 +186,20 @@ class LapAnalysisWindow(QMainWindow):
         """)
         layout.addWidget(btn_studio)
 
+        btn_import = QPushButton("📥 IMPORTAR VOLTA (.apex)")
+        btn_import.setCursor(Qt.PointingHandCursor)
+        btn_import.setToolTip("Importa uma volta externa (.apex / .json.gz) para o catálogo local")
+        btn_import.clicked.connect(self.on_import_lap)
+        btn_import.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {T.BG_HEADER}; color: #00e676;
+                border: 1px solid #00e676; padding: 6px;
+                font-family: "{T.FONT_UI}"; font-size: 11px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: #00e676; color: #000; }}
+        """)
+        layout.addWidget(btn_import)
+
         buttons = QHBoxLayout()
         buttons.setSpacing(4)
         for text, slot, tip in (
@@ -164,6 +208,8 @@ class LapAnalysisWindow(QMainWindow):
              "Protege a volta selecionada da limpeza automática"),
             ("RELATÓRIO", self.on_generate_report,
              "Gera relatório analítico completo de desempenho (pontos positivos, negativos e onde melhorar)"),
+            ("EXPORTAR (.apex)", self.on_export_apex,
+             "Exporta a volta selecionada como pacote .apex"),
             ("CSV", self.on_export_csv,
              "Exporta a volta selecionada como CSV"),
             ("MoTeC (.ld)", self.on_export_motec,
@@ -315,7 +361,7 @@ class LapAnalysisWindow(QMainWindow):
         else:
             self.lbl_status.setText(
                 "Nenhuma volta gravada ainda. Rode o dashboard "
-                "(main.pyw) e entre na pista.")
+                "(ApexView.pyw) e entre na pista.")
 
     def _selected_records(self):
         """[(track, car, LapRecord)] do que está marcado na árvore."""
@@ -539,8 +585,9 @@ class LapAnalysisWindow(QMainWindow):
                 background-color: {T.BG_HEADER}; color: #ffffff;
             }}
         """)
-        act_studio = menu.addAction("⚡ Abrir no Estúdio Pro (main2.pyw)")
+        act_studio = menu.addAction("⚡ Abrir no Estúdio Pro (ApexView_POS.pyw)")
         act_report = menu.addAction("📊 Gerar Relatório de Desempenho")
+        act_export_apex = menu.addAction("📦 Exportar Pacote de Volta (.apex)")
         act_motec = menu.addAction("Exportar MoTeC (.ld)")
         act_csv = menu.addAction("Exportar CSV")
         menu.addSeparator()
@@ -552,6 +599,8 @@ class LapAnalysisWindow(QMainWindow):
             self.on_open_studio()
         elif action == act_report:
             self.on_generate_report()
+        elif action == act_export_apex:
+            self.on_export_apex()
         elif action == act_motec:
             self.on_export_motec()
         elif action == act_csv:
@@ -561,6 +610,38 @@ class LapAnalysisWindow(QMainWindow):
         elif action == act_del:
             self.on_delete_clicked()
 
+    def on_import_lap(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Importar Pacote de Volta", "",
+            "Pacote de Volta Apex (*.apex *.lap.json.gz *.json.gz *.json);;Todos os Arquivos (*.*)"
+        )
+        if not path:
+            return
+        rec = self.library.import_lap_file(path)
+        if rec:
+            self.reload_catalog()
+            self.lbl_status.setText(f"Volta importada com sucesso: {rec.track} · {rec.car} ({rec.lap_time_str})")
+        else:
+            self.lbl_status.setText("Erro ao importar pacote de volta. Verifique a integridade do arquivo.")
+
+    def on_export_apex(self):
+        marcadas = self._selected_records()
+        if not marcadas:
+            self.lbl_status.setText("Selecione uma volta à esquerda para exportar o pacote .apex.")
+            return
+        track, car, rec = marcadas[0]
+        sugestao = f"{track}_{car}_L{rec.lap_number}_{rec.lap_time_str.replace(':', '-').replace('.', '-')}.apex"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportar Pacote de Volta (.apex)", sugestao,
+            "Pacote de Volta Apex (*.apex);;Todos os Arquivos (*.*)"
+        )
+        if not path:
+            return
+        if self.library.export_lap_file(track, car, rec, path):
+            self.lbl_status.setText(f"Pacote .apex exportado para: {os.path.basename(path)}")
+        else:
+            self.lbl_status.setText("Erro ao exportar pacote .apex.")
+
     def on_open_studio(self):
         from ui.telemetry_studio import TelemetryStudioWindow
         self._studio_win = TelemetryStudioWindow(self.library)
@@ -569,6 +650,186 @@ class LapAnalysisWindow(QMainWindow):
             track, car, rec = marcadas[0]
             self._studio_win.load_lap(track, car, rec)
         self._studio_win.show()
+
+    def _on_main_tab_changed(self, index: int):
+        if index == 1:
+            self.update_stint_analysis()
+
+    def _build_stint_view(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        header = QHBoxLayout()
+        lbl_info = QLabel("ANÁLISE DE STINT: DEGRADAÇÃO DE PNEUS, RITMO & JANELA DE BOX")
+        lbl_info.setFont(T.f_title(10))
+        lbl_info.setStyleSheet(f"color: {T.TXT_TITLE};")
+        header.addWidget(lbl_info, 1)
+
+        self.btn_refresh_stint = QPushButton("RECALCULAR STINT")
+        self.btn_refresh_stint.setCursor(Qt.PointingHandCursor)
+        self.btn_refresh_stint.clicked.connect(self.update_stint_analysis)
+        self.btn_refresh_stint.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {T.BG_INSET}; color: #00e5ff;
+                border: 1px solid #00e5ff; padding: 4px 10px; font-weight: bold; font-size: 11px;
+            }}
+            QPushButton:hover {{ background-color: #00e5ff; color: #000; }}
+        """)
+        header.addWidget(self.btn_refresh_stint)
+        layout.addLayout(header)
+
+        body = QSplitter(Qt.Vertical)
+
+        # Gráficos de Stint
+        charts_split = QSplitter(Qt.Horizontal)
+
+        # 1. Gráfico de Desgaste dos 4 Pneus
+        self.plot_tyre_wear = pg.PlotWidget()
+        self.plot_tyre_wear.showGrid(x=True, y=True, alpha=0.15)
+        self.plot_tyre_wear.setLabel('left', "Desgaste (%)")
+        self.plot_tyre_wear.setLabel('bottom', "Volta do Stint")
+        self.plot_tyre_wear.setYRange(0, 105)
+        self.plot_tyre_wear.addLegend()
+        self.curve_wear_fl = self.plot_tyre_wear.plot(pen=pg.mkPen("#00e5ff", width=2), name="FL (D.Esq)")
+        self.curve_wear_fr = self.plot_tyre_wear.plot(pen=pg.mkPen("#00e676", width=2), name="FR (D.Dir)")
+        self.curve_wear_rl = self.plot_tyre_wear.plot(pen=pg.mkPen("#ffd600", width=2), name="RL (T.Esq)")
+        self.curve_wear_rr = self.plot_tyre_wear.plot(pen=pg.mkPen("#ff5252", width=2), name="RR (T.Dir)")
+        self.line_cliff = pg.InfiniteLine(pos=40, angle=0, pen=pg.mkPen("#ff1744", width=1.5, style=Qt.DashLine))
+        self.plot_tyre_wear.addItem(self.line_cliff)
+        charts_split.addWidget(self.plot_tyre_wear)
+
+        # 2. Gráfico de Ritmo e Degradação
+        self.plot_pace = pg.PlotWidget()
+        self.plot_pace.showGrid(x=True, y=True, alpha=0.15)
+        self.plot_pace.setLabel('left', "Tempo de Volta (s)")
+        self.plot_pace.setLabel('bottom', "Volta do Stint")
+        self.plot_pace.addLegend()
+        self.curve_pace_pts = self.plot_pace.plot(pen=None, symbol='o', symbolSize=7,
+                                                  symbolBrush=pg.mkBrush("#00e5ff"), name="Tempo Real")
+        self.curve_pace_trend = self.plot_pace.plot(pen=pg.mkPen("#ff9100", width=2, style=Qt.DashLine),
+                                                    name="Regressão Degradação")
+        charts_split.addWidget(self.plot_pace)
+
+        # 3. Gráfico de Combustível
+        self.plot_fuel = pg.PlotWidget()
+        self.plot_fuel.showGrid(x=True, y=True, alpha=0.15)
+        self.plot_fuel.setLabel('left', "Combustível (L)")
+        self.plot_fuel.setLabel('bottom', "Volta do Stint")
+        self.plot_fuel.addLegend()
+        self.curve_fuel_level = self.plot_fuel.plot(pen=pg.mkPen("#76ff03", width=2), name="Nível (L)")
+        self.curve_fuel_burn = self.plot_fuel.plot(pen=pg.mkPen("#ffab00", width=1.8, style=Qt.DotLine), name="Consumo (L/v)")
+        charts_split.addWidget(self.plot_fuel)
+
+        body.addWidget(charts_split)
+
+        # Card de Estratégia de Parada
+        self.card_strategy = QFrame()
+        self.card_strategy.setStyleSheet(f"""
+            QFrame {{
+                background-color: {T.BG_INSET};
+                border: 1px solid {T.BORDER};
+                padding: 8px;
+            }}
+        """)
+        strat_lay = QVBoxLayout(self.card_strategy)
+        strat_lay.setContentsMargins(10, 8, 10, 8)
+        strat_lay.setSpacing(4)
+
+        lbl_strat_title = QLabel("📋 RECOMENDAÇÃO DE ESTRATÉGIA DE BOX & PIT WINDOW")
+        lbl_strat_title.setFont(T.f_title(9))
+        lbl_strat_title.setStyleSheet("color: #00e5ff;")
+        strat_lay.addWidget(lbl_strat_title)
+
+        self.lbl_strat_summary = QLabel("Selecione uma sessão ou volta com histórico à esquerda para gerar a projeção.")
+        self.lbl_strat_summary.setFont(QFont(T.FONT_MONO, 10))
+        self.lbl_strat_summary.setStyleSheet(f"color: {T.TXT_VALUE};")
+        self.lbl_strat_summary.setWordWrap(True)
+        strat_lay.addWidget(self.lbl_strat_summary)
+
+        body.addWidget(self.card_strategy)
+        body.setSizes([580, 160])
+
+        layout.addWidget(body, 1)
+        return panel
+
+    def update_stint_analysis(self):
+        avisos_ui = []
+        marcadas = self._selected_records()
+        if not marcadas:
+            all_recs = self.library.all_records()
+            if not all_recs:
+                self.lbl_strat_summary.setText("Nenhuma volta disponível no catálogo para calcular o stint.")
+                return
+            rec = all_recs[0]
+            track, car = rec.track, rec.car
+            session_laps = [r for r in all_recs if r.track == track and r.car == car and r.session_id == rec.session_id]
+            avisos_ui.append(f"Nenhuma volta marcada: mostrando a sessão mais recente ({track} · {car}).")
+        else:
+            track, car, rec = marcadas[0]
+            all_combo = self.library.records(track, car)
+            session_laps = [r for r in all_combo if r.session_id == rec.session_id]
+            if len(session_laps) < 2:
+                # Degradação de pneu só faz sentido dentro de um stint. Juntar
+                # sessões diferentes mistura jogos de pneu e dias diferentes,
+                # então a conta sai, mas com o aviso na tela.
+                session_laps = all_combo
+                avisos_ui.append(
+                    "A sessão marcada tem menos de 2 voltas: a projeção usa TODAS as voltas "
+                    "deste carro/pista, de sessões e jogos de pneu possivelmente diferentes.")
+
+        if not session_laps:
+            self.lbl_strat_summary.setText("Nenhuma volta gravada nesta sessão para análise de stint.")
+            return
+
+        from core.stint_analysis import analyze_stint
+        result = analyze_stint(track, car, session_laps, self.library)
+
+        if not result.laps_data:
+            self.lbl_strat_summary.setText("Voltas incompletas ou sem telemetria suficiente para traçar tendências.")
+            return
+
+        # Eixo X: a volta DENTRO do stint (1, 2, 3...), que é o mesmo número em
+        # que a janela de box e o cliff são projetados. Usar o contador da
+        # sessão aqui faria o texto falar de uma volta que o gráfico não mostra.
+        laps_x = [float(i + 1) for i in range(len(result.laps_data))]
+
+        # Pneus — volta sem o canal simplesmente não vira ponto no gráfico.
+        medidas = [(i + 1.0, l) for i, l in enumerate(result.laps_data) if l.wear_measured]
+        wear_x = [x for x, _ in medidas]
+        for curva, roda in ((self.curve_wear_fl, 0), (self.curve_wear_fr, 1),
+                            (self.curve_wear_rl, 2), (self.curve_wear_rr, 3)):
+            curva.setData(wear_x, [l.tyre_wear[roda] for _, l in medidas])
+        self.line_cliff.setPos(result.cliff_threshold_pct)
+
+        # Ritmo e Degradação
+        times_y = [l.lap_time_s for l in result.laps_data]
+        self.curve_pace_pts.setData(laps_x, times_y)
+        if result.r2_time_deg > 0:
+            trend_y = [result.base_lap_time_s + (result.time_deg_slope_s * x) for x in laps_x]
+            self.curve_pace_trend.setData(laps_x, trend_y)
+        else:
+            self.curve_pace_trend.setData([], [])
+
+        # Combustível
+        fuel = [(i + 1.0, l) for i, l in enumerate(result.laps_data) if l.fuel_measured]
+        fuel_x = [x for x, _ in fuel]
+        self.curve_fuel_level.setData(fuel_x, [l.fuel_level for _, l in fuel])
+        self.curve_fuel_burn.setData(fuel_x, [l.fuel_used for _, l in fuel])
+
+        cabecalho = (
+            f"🏎️ Pista: {result.track}  ·  Carro: {result.car}  ·  Voltas no Stint: {result.total_laps_analyzed}"
+        )
+        corpo = result.recommendation_text
+        for aviso in avisos_ui:
+            corpo += f"\n• ⚠ {aviso}"
+        txt = (
+            f"{cabecalho}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{corpo}"
+        )
+        self.lbl_strat_summary.setText(txt)
 
 
 class LapReportDialog(QDialog):

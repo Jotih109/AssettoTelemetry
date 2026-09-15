@@ -1,5 +1,5 @@
 """
-tests/test_main2_smoke.py — Testes automatizados da Estação de Telemetria (main2.pyw)
+tests/test_main2_smoke.py — Testes automatizados da Estação de Telemetria (ApexView_POS.pyw)
 =====================================================================================
 
 Cobre:
@@ -55,8 +55,8 @@ def check(name, fn):
 
 
 def load_main2():
-    spec = importlib.util.spec_from_file_location(
-        "main2_module", os.path.join(ROOT, "main2.pyw"))
+    target = os.path.join(ROOT, "ApexView_POS.pyw")
+    spec = importlib.util.spec_from_file_location("apexview_pos_module", target)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

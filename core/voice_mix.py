@@ -90,9 +90,9 @@ CHANNELS: List[Channel] = [
     Channel(
         id="pace",
         label="Tempo, setor e delta",
-        hint="Delta contra a referência, setor que fechou, melhor volta",
+        hint="Delta contra a referência, setor que fechou, melhor volta e teto teórico",
         prefixes=("lap:melhor", "lap:pior", "lap:sector", "lap:consistencia",
-                  "delta", "sector:", "best_lap", "last_lap:"),
+                  "delta", "sector:", "best_lap", "last_lap:", "theoretical_ceiling"),
         sample="Perdemos 0,35 segundos pra referência nessa volta",
     ),
     Channel(

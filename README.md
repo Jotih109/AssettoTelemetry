@@ -1,6 +1,6 @@
 # 🏎️ ApexView — Dashboard de Telemetria para Assetto Corsa (MoTeC i2 Style)
 
-> ⚠️ **PROJETO EM DESENVOLVIMENTO ATIVO** — Dashboard profissional de telemetria em tempo real para Assetto Corsa 1, inspirado nos layouts de engenharia de dados do **MoTeC i2 Pro**. Acompanha uma tela separada de análise pós-sessão ([mapa.pyw](mapa.pyw)).
+> ⚠️ **PROJETO EM DESENVOLVIMENTO ATIVO** — Dashboard profissional de telemetria em tempo real para Assetto Corsa 1, inspirado nos layouts de engenharia de dados do **MoTeC i2 Pro**. Acompanha a **Estação de Telemetria Ponto a Ponto** ([ApexView_POS.pyw](ApexView_POS.pyw)) e a tela de comparação de voltas ([mapa.pyw](mapa.pyw)).
 
 ---
 
@@ -16,13 +16,14 @@
 
 ```bash
 pip install -r requirements.txt
-python main.pyw
+python ApexView.pyw
 ```
 
 Pode abrir o dashboard antes ou depois do jogo. Ele fica em `AGUARDANDO O ASSETTO CORSA` e conecta sozinho quando você entra na pista — **não há nada a configurar no jogo**: sem porta UDP, sem plugin, sem editar arquivo do AC.
 
-Sem o jogo instalado? `python main.pyw --mock` roda com o simulador interno.
-Quer só analisar as voltas de ontem? `python mapa.pyw`.
+Sem o jogo instalado? `python ApexView.pyw --mock` roda com o simulador interno.  
+Quer analisar com ferramentas de engenharia de pista (MoTeC Studio)? `python ApexView_POS.pyw`.  
+Quer comparar voltas em mapa e gráficos? `python mapa.pyw`.
 
 **Pré-requisitos:** Windows (a memória compartilhada é lida via Win32/`ctypes`), Python 3.8+, Assetto Corsa 1 (launcher original ou Content Manager).
 
@@ -50,13 +51,14 @@ Quer só analisar as voltas de ontem? `python mapa.pyw`.
 | [Engenheiro de pista](#-engenheiro-de-pista-análise-por-regras--voz) | o balanço da volta, com voz |
 | [Análise curva a curva](#-análise-curva-a-curva-turn-by-turn) | ponto de freada, $V_{min}$, retomada |
 | [Biblioteca de voltas](#-biblioteca-de-voltas-histórico-e-exportação) | como as voltas são guardadas |
+| [**Estação MoTeC (`ApexView_POS.pyw`)**](#-estação-de-telemetria-ponto-a-ponto-apexview_pospyw) | **telemetria forense, dual overlay, delta contínuo, GG scatter e catálogo hierárquico** |
 | [Análise pós-sessão](#-tela-de-análise-pós-sessão-mapapyw) | comparar até 4 voltas, offline |
 | [**Relatórios de desempenho**](#-relatórios-de-desempenho--diagnóstico-causal-onde-melhorar-e-por-quê) | pontos positivos, negativos, onde melhorar e por quê |
 | [**Exportação MoTeC i2**](#-exportação-motec-i2-ld--ldx-para-motec-i2-pro) | telemetria nativa no MoTeC i2 Pro |
 | [Onde ficam os dados](#-onde-ficam-os-dados) | o que cada arquivo em disco é |
 | [Preferências](#-preferências-persistentes-configjson) | todas as chaves do `config.json` |
 | [Como executar](#-como-executar) | modos, argumentos e variáveis |
-| [Testes](#-testes-automatizados) | 554 verificações |
+| [Testes](#-testes-automatizados) | 570+ verificações |
 | [Solução de problemas](#-solução-de-problemas) | quando algo não aparece |
 | [O que ainda falta](#-o-que-ainda-falta--planejado) | roadmap honesto |
 
@@ -286,7 +288,7 @@ No catálogo, cada sessão fica **agrupada e identificável**: a tela de anális
 - **Mede antes de opinar:** as medidas de pilotagem (sobreposição de pedais, suavidade de volante, pontos de troca, desvio de traçado) ficam em [core/driving_analysis.py](core/driving_analysis.py), separadas das regras. Toda medida devolve `None` quando o canal não existe — ghost antigo sem marcha ou sem coordenada faz o engenheiro se calar, não chutar.
 - **Canal de marcha:** a marcha passou a ser gravada por volta (é dela que sai o *"passou de 2ª onde a referência usa 3ª"*). Voltas gravadas **antes** desta versão não têm o canal, então o conselho de marcha só aparece quando a volta de referência também for nova.
 - **Fica calado quando está tudo bem** — é o comportamento mais testado da funcionalidade.
-- **Bancada de voz:** `python test_voice.pyw` abre uma janela que monta estados de telemetria e voltas sintéticas de verdade e passa pelo `RaceEngineer`, para ouvir cada aviso (e testar prioridade e preempção) sem entrar na pista.
+- **Bancada de voz:** `python tests/test_voice.pyw` abre uma janela que monta estados de telemetria e voltas sintéticas de verdade e passa pelo `RaceEngineer`, para ouvir cada aviso (e testar prioridade e preempção) sem entrar na pista.
 
 ---
 
@@ -356,37 +358,66 @@ python mapa.pyw
 
 ---
 
-### 🏁 Estação de Telemetria Ponto a Ponto (`main2.pyw`)
-Estação de trabalho dedicada de engenharia de corrida real (**MoTeC Telemetry Studio**), projetada para análise **ponto a ponto** e visualização espacial de frenagem e aceleração:
+### 🏁 Estação de Telemetria Ponto a Ponto (`ApexView_POS.pyw`)
+Estação de trabalho dedicada de engenharia de corrida real (**ApexView — MoTeC Telemetry Studio**), projetada para análise **ponto a ponto**, visualização espacial e telemetria forense pós-treino:
 
 ```bash
-python main2.pyw
+python ApexView_POS.pyw
 ```
 *(Também pode ser aberta diretamente a partir do `mapa.pyw` pelo botão **`⚡ ESTÚDIO PRO (MAIN2)`** ou do dashboard principal pelo botão **`TELEMETRIA (MAIN2)`**).*
 
-#### 🚀 Recursos de Nível MoTeC i2 / VRS / Popometer:
-1. **Traçado 2D com Heatmap Interativo:**
-   - **Frenagem & Acelerador:** veja com clareza cristalina **onde você freou** (vermelho vivo para frenagem pesada, laranja/amarelo para transição de *trail braking* aliviando o pedal na entrada da curva, verde para aceleração plena e cinza em transição).
-   - **Heatmap de Velocidade:** gradiente contínuo de velocidade (azul nas curvas lentas até vermelho nas retas).
-   - **Marchas:** cores individuais para cada marcha engatada ao redor da pista.
-   - **Delta Espacial:** verde onde você está ganhando tempo em relação à volta de referência e vermelho onde está perdendo.
-2. **Marcadores de Curvas e Ápices na Pista:**
-   - Pontos de início de frenagem com velocidade (🔴 ex: `195 km/h`).
-   - Ponto de ápice com velocidade mínima (🟡 ex: `74 km/h`).
-   - Badges com o nome oficial ou numeração de cada curva.
-3. **Inspeção Ponto a Ponto Sincronizada (Snap por Proximidade):**
-   - Ao passar o mouse ou clicar em qualquer trecho do traçado da pista, o cursor salta instantaneamente para o ponto exato da volta.
-   - O carro principal (Ciano) e o carro fantasma de referência (Laranja) são desenhados na pista com vetor de direção e ângulo.
-4. **Círculo de Atrito G-G (Friction Circle):**
-   - Diagrama MoTeC de Força G Lateral vs Longitudinal com anéis de 0.5G a 2.0G e rastro da trajetória recente, permitindo visualizar com clareza o *trail braking* e se o limite de aderência foi 100% aproveitado.
-5. **HUD de Telemetria Digital:**
-   - Velocímetro em tempo real, barras de freio e acelerador com percentual exato (0-100%), mostrador de ângulo de volante em graus (`↰ -24°` / `↱ +18°`), marcha grande e tacômetro de RPM.
-6. **Replay com Scrubber e Velocidade Variável:**
-   - Assista à volta se desenhar ponto a ponto em velocidade real (1.0x), acelerada (2.0x) ou câmera lenta (0.25x / 0.5x) para estudar cada movimento de pedal.
-7. **Tabela Curva a Curva (Turn-by-Turn):**
-   - Ponto de frenagem em metros, velocidade no ápice, ponto de retomada de acelerador pleno e tempo da curva. Clicar em qualquer linha da tabela pula a visualização para aquela curva.
+#### 🚀 Recursos de Nível MoTeC i2 Pro / VRS / Popometer:
+
+1. **Sobreposição de Voltas (Dual Overlay Comparison):**
+   - **Gráficos Empilhados com Linha Dupla:**
+     - **Velocidade:** Volta ativa em ciano sólido (`#00e5ff`, 2px); volta de referência em linha pontilhada âmbar (`#ffab00`).
+     - **Acelerador & Freio:** Volta ativa em verde e vermelho sólidos; referência em linhas pontilhadas contrastantes (`#b9f6ca` e `#ff80ab`).
+     - **Marcha & Volante:** Linhas contínuas da volta atual sobrepostas às linhas tracejadas da volta de referência.
+   - **Traçado 2D Duplo no Mapa da Pista:** visualização simultânea das linhas de ambos os carros para comparar raio de curva, largura de entrada e tangência no ápice (*apex*).
+   - **Sincronização por Distância Normalizada (0 a 100%):** O cursor e a barra de replay sincronizam os carros rigorosamente pela metragem relativa da pista, eliminando descompassos artificiais causados por voltas com tempos totais diferentes.
+
+2. **Cálculo e Gráfico de Delta Temporal Contínuo ($\Delta t$):**
+   - **Algoritmo Ponto a Ponto:** $\Delta t(d) = t_{\text{ativa}}(d) - t_{\text{ref}}(d)$ calculado via busca binária e interpolação linear para cada metro percorrido.
+   - **Curva Bicolor Dinâmica:** segmentos interpolados no cruzamento pelo zero:
+     - **$\Delta t > 0$ (Vermelho):** a volta ativa está perdendo tempo, com preenchimento translúcido até o zero.
+     - **$\Delta t < 0$ (Verde):** a volta ativa está ganhando tempo, com preenchimento translúcido até o zero.
+   - **Auto-Scale Inteligente:** escala mínima padronizada de **-400 ms a +400 ms** (grade padrão MoTeC i2), expandindo automaticamente com margem caso a diferença seja maior.
+
+3. **Diagrama G-G Pós-Sessão (Friction Circle Pro):**
+   - **Nuvem de Dispersão (Scatter Plot):** modo pós-treino exibindo a nuvem completa de pontos da volta com opacidade controlada ($\alpha \approx 0.20$), mapeando as forças físicas do carro:
+     - Frenagem forte ($G_{\text{lon}} < -0.3$): Vermelho.
+     - Aceleração forte ($G_{\text{lon}} > +0.3$): Verde.
+     - Apoio lateral em curva: Ciano.
+     - Nuvem de referência: Cinza suave para confronto de limites de aderência.
+   - **Buffer Offscreen em `QPixmap` para 60 FPS:** a nuvem é pré-renderizada para imagem estática na memória e apenas o ponto instantâneo ativo com halo pulsante é animado durante o scrubbing do replay ($< 0.05\text{ ms}$ por frame).
+
+4. **Tabela de Diagnóstico Forense de Curvas:**
+   - Métricas calculadas automaticamente por setor de curva:
+     - **Início da Frenagem:** metro exato do início da aplicação e velocidade de entrada (ex: `655 m (276 km/h)` ou `"Pleno / Sem freio"`).
+     - **Velocidade Mínima no Ápice ($V_{\min}$):** velocidade no ápice dinâmico com precisão decimal.
+     - **Ponto de Retomada:** metro de retomada plena ou percentual do acelerador parcial (ex: `3216 m (100%)` ou `Parcial (64%)`).
+     - **Tempo de Trecho e Delta ($\Delta t$):** cronometragem da curva e ganho/perda em relação à volta de referência (verde/vermelho).
+   - **Navegação Rápida:** clique em qualquer linha da tabela para teletransportar o cursor do replay diretamente para a aproximação da curva.
+
+5. **Organização Hierárquica da Biblioteca de Voltas:**
+   - **Hierarquia Cronológica:** `📅 Data / Dia ➔ 🏁 Pista ➔ 🏎️ Carro ➔ ⏱️ Sessão (Horário + Tipo) ➔ 🏁 Voltas`.
+   - **Modos de Visualização Alternáveis:** seletor no topo para alternar entre:
+     - `📅 Por Data (Dia ➔ Pista ➔ Carro)` *(Padrão)*.
+     - `🏁 Por Pista (Pista ➔ Carro ➔ Data)`.
+     - `🏎️ Por Carro (Carro ➔ Pista ➔ Data)`.
+   - **Busca e Filtro em Tempo Real:** campo `[ 🔍 Filtrar pista, carro, data... ]` que filtra a árvore instantaneamente conforme a digitação e abre automaticamente os ramos correspondentes.
+   - **Metadados de Sessão:** grava e exibe o tipo de sessão (*Practice, Qualify, Race, Hotlap*) no índice `index.json`.
+
+6. **Traçado 2D com Heatmap Interativo:**
+   - Modos de visualização rápida: Frenagem & Aceleração, Velocidade (gradiente térmico), Marchas engatadas e Delta espacial.
+   - Marcadores sobre a pista com velocidade de início de frenagem (🔴 km/h) e velocidade mínima no ápice (🟡 $V_{\min}$).
+
+7. **HUD de Telemetria e Replay Scrubber:**
+   - Velocímetro digital, barras de pedais (0-100%), ângulo de volante em graus, indicador de marcha e tacômetro de RPM.
+   - Replay com controle de velocidade (0.25x a 2.0x), play/pause e busca por slider.
+
 8. **Modo Demonstração Instantâneo (Mock Demo):**
-   - Se você ainda não abriu o jogo ou não gravou voltas, o botão **`⚡ CARREGAR VOLTA DEMO (MOCK)`** gera na hora uma volta realista em Interlagos com o Porsche 992 GT3 Cup para você explorar todas as ferramentas imediatamente.
+   - O botão **`⚡ CARREGAR VOLTA DEMO (MOCK)`** gera imediatamente uma sessão realista com duas voltas sobrepostas em Interlagos com o Porsche 992 GT3 Cup para exploração completa das ferramentas mesmo sem o simulador aberto.
 
 ---
 
@@ -641,7 +672,11 @@ AssettoCorsa-Telemetry/
 │   └── components.py       # Widgets modulares (Cards, CustomPlot, AssistLED, etc.)
 ├── tests/                  # Cada arquivo roda sozinho e imprime o placar
 │   ├── weekend_sim.py                 # Gerador de telemetria sintética (piloto e pista)
+│   ├── mock_game.py                   # Injeta telemetria na memória compartilhada do
+│   │                                  #   Windows, para exercitar o provider REAL
+│   ├── test_voice.pyw                 # Bancada de voz: ouvir cada aviso sem ir à pista
 │   ├── test_race_weekend.py           # * Fim de semana inteiro: T1, T2, T3, Q e corrida
+│   ├── test_advanced_features.py      # Pacote .apex, trail braking, ideal teórica e stint
 │   ├── test_assettocorsa_provider.py  # Unidade do provider do AC (layout dos structs)
 │   ├── test_corner_analysis.py        # Análise curva a curva
 │   ├── test_corner_bests.py           # Aprendizado do coach entre sessões
@@ -660,14 +695,10 @@ AssettoCorsa-Telemetry/
 │   ├── README.md                      # Como escrever um mapa à mão
 │   └── <pista>.json                   # Manual (versionado) ou <pista>.auto.json (detectado)
 │
-├── main.pyw                # > Ponto de entrada do dashboard
+├── ApexView.pyw            # > Ponto de entrada do dashboard
+├── ApexView_POS.pyw        # > Estação de telemetria ponto a ponto (estilo MoTeC)
 ├── mapa.pyw                # > Tela de análise pós-sessão (offline)
 ├── ajustar_voz.pyw         # > Ajuste da voz: ritmo, tom e timbre, escolhidos de ouvido
-├── test_voice.pyw          # > Bancada de voz: ouvir cada aviso sem entrar na pista
-├── mock_game.py            # > Injeta telemetria na memória compartilhada do Windows,
-│                           #   para exercitar o provider REAL sem o jogo aberto
-├── reset.ps1               # Atalho: avisa se o AC está aberto e sobe o dashboard
-├── build_exe.bat           # Empacotamento via PyInstaller
 ├── requirements.txt        # Dependências Python
 │
 ├── config.json             # Preferências (criado sozinho, fora do versionamento)
@@ -683,14 +714,14 @@ AssettoCorsa-Telemetry/
 
 ### Com o Assetto Corsa
 ```bash
-python main.pyw
+python ApexView.pyw
 ```
 Pode abrir antes ou depois do jogo. Fica em `AGUARDANDO O ASSETTO CORSA` até você entrar na pista, e **reconecta sozinho** se você sair para o menu, trocar de carro ou fechar e reabrir o jogo.
 
 ### Sem o jogo — simulador interno
 ```bash
-python main.pyw --mock          # simulador interno
-python main.pyw --no-mock       # força o provider real, ignorando o config.json
+python ApexView.pyw --mock      # simulador interno
+python ApexView.pyw --no-mock   # força o provider real, ignorando o config.json
 ```
 Também vale `APEXVIEW_MOCK=1` no ambiente ou `"mock_mode": true` no `config.json`.
 Precedência: **argumento -> variável de ambiente -> `config.json`**.
@@ -702,27 +733,28 @@ python mapa.pyw
 
 ### Bancada de voz
 ```bash
-python test_voice.pyw
+python tests/test_voice.pyw
 ```
 Monta estados de telemetria e voltas sintéticas de verdade, passa pelo `RaceEngineer` e deixa você **ouvir cada aviso** — inclusive testar prioridade e preempção — sem entrar na pista. É como se afere se a voz está agradável antes de levá-la para dentro do carro.
 
 ### Exercitar o provider REAL sem o jogo
 ```bash
-python mock_game.py     # terminal A: escreve na memória compartilhada do Windows
-python main.pyw         # terminal B: SEM --mock, para usar o provider de verdade
+python tests/mock_game.py  # terminal A: escreve na memória compartilhada do Windows
+python ApexView.pyw     # terminal B: SEM --mock, para usar o provider de verdade
 ```
-O `--mock` troca o provider por um simulador interno; o `mock_game.py` é diferente e vai mais fundo: ele grava nas estruturas nativas do AC (`Localcpmf_physics` e companhia), então o caminho exercitado é o **mesmo** que roda com o jogo aberto — leitura por `ctypes`, layout dos structs e tudo.
+O `--mock` troca o provider por um simulador interno; o `tests/mock_game.py` é diferente e vai mais fundo: ele grava nas estruturas nativas do AC (`Localcpmf_physics` e companhia), então o caminho exercitado é o **mesmo** que roda com o jogo aberto — leitura por `ctypes`, layout dos structs e tudo.
 
 ### Executável standalone
-```bash
-build_exe.bat
-```
+
+O script de empacotamento (`build_exe.bat`) foi removido: ele nunca chegou
+a ser testado de ponta a ponta. Por ora o app roda pelo Python — ver o
+roadmap no fim deste arquivo.
 
 ---
 
 ## ⌨️ Controles da Interface
 
-### 🖥️ Dashboard Principal (`main.pyw`)
+### 🖥️ Dashboard Principal (`ApexView.pyw`)
 
 | Onde | O que faz |
 |---|---|
@@ -753,18 +785,21 @@ build_exe.bat
 
 ## 🧪 Testes Automatizados
 
-Cada arquivo é um script que roda sozinho e imprime o placar (não precisa de pytest). **554 verificações**, todas passando:
+Cada arquivo é um script que roda sozinho e imprime o placar (não precisa de pytest). **570+ verificações**, todas passando:
 
 ```bash
 python tests/test_race_weekend.py         # ⭐ o fim de semana inteiro, ponta a ponta
+python tests/test_apexview_advanced.py    # 🚀 dual overlay, delta contínuo, GG scatter e tabela forense
+python tests/test_lap_organization.py     # 📅 organização da árvore (Dia/Pista/Carro/Sessão) e filtros
+python tests/test_main2_smoke.py          # smoke test do estúdio MoTeC (ApexView)
 python tests/test_live_coach.py           # disciplina do coach: quando fala e quando cala
 python tests/test_corner_bests.py         # aprendizado do coach entre sessões
 python tests/test_lap_library.py          # catálogo: índice, compressão, retenção
 python tests/test_lap_report.py           # motor de diagnóstico causal e relatórios
 python tests/test_motec_exporter.py       # exportação MoTeC binária (.ld) e marcas (.ldx)
 python tests/test_session_manager.py      # persistência, ghosts, volta suja, troca de sessão
-python tests/test_ui_smoke.py             # interface do dashboard
-python tests/test_mapa_smoke.py           # interface da análise pós-sessão
+python tests/test_ui_smoke.py             # interface do dashboard principal
+python tests/test_mapa_smoke.py           # interface da análise pós-sessão mapa.pyw
 python tests/test_assettocorsa_provider.py
 python tests/test_corner_analysis.py
 python tests/test_driving_analysis.py
@@ -850,7 +885,7 @@ O piloto sintético é parametrizável ([tests/weekend_sim.py](tests/weekend_sim
 
 **Empacotamento:**
 
-- [ ] **Executável standalone (`.exe`)** — o [build_exe.bat](build_exe.bat) chama o PyInstaller e gera `dist/ApexView/`, mas **ainda não foi testado de ponta a ponta**. Falta pelo menos copiar `track_maps/` para junto do executável: com o app congelado, os diretórios são resolvidos ao lado do `.exe` (ver [core/paths.py](core/paths.py)), e sem essa pasta as pistas perdem o mapeamento manual das curvas.
+- [ ] **Executável standalone (`.exe`)** — o `build_exe.bat` chamava o PyInstaller e gerava `dist/ApexView/`, mas **nunca foi testado de ponta a ponta** e foi removido do repositório. Refazê-lo precisa, no mínimo, copiar `track_maps/` para junto do executável: com o app congelado, os diretórios são resolvidos ao lado do `.exe` (ver [core/paths.py](core/paths.py)), e sem essa pasta as pistas perdem o mapeamento manual das curvas.
 
 ---
 

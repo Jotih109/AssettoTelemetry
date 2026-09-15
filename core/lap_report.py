@@ -104,6 +104,8 @@ class LapReportResult:
     total_potential_gain_s: float = 0.0
     corners_with_losses: int = 0
     corners_with_gains: int = 0
+    ideal_corners_str: str = ""
+    ideal_potential_gain_str: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -544,6 +546,20 @@ class LapReportGenerator:
                     action="Desenrole o volante antes de aplicar aceleração plena e seja mais progressivo no curso inicial do pedal."
                 ))
 
+        ideal_corners_str = ""
+        ideal_potential_gain_str = ""
+        try:
+            from core.lap_library import LapLibrary
+            from core.corner_bests import CornerBestStore
+            lib = LapLibrary()
+            store = CornerBestStore(lib)
+            summary = store.get_summary(track_name, car_name, corners=corners, track_length=track_len)
+            if summary and summary.ideal_time_s > 0:
+                ideal_corners_str = summary.ideal_time_str
+                ideal_potential_gain_str = summary.delta_str
+        except Exception:
+            pass
+
         return LapReportResult(
             track=track_name or "Pista",
             car=car_name or "Carro",
@@ -565,7 +581,9 @@ class LapReportGenerator:
             techniques=techniques,
             total_potential_gain_s=total_potential_gain,
             corners_with_losses=corners_with_losses,
-            corners_with_gains=corners_with_gains
+            corners_with_gains=corners_with_gains,
+            ideal_corners_str=ideal_corners_str,
+            ideal_potential_gain_str=ideal_potential_gain_str
         )
 
     # -----------------------------------------------------------------------
@@ -620,6 +638,8 @@ class LapReportGenerator:
         
         if res.total_potential_gain_s > 0:
             lines.append(f"- **Tempo Recuperável Identificado:** aproximadamente **~{res.total_potential_gain_s:.2f}s** concentrados em **{res.corners_with_losses} curva(s)**.")
+        if res.ideal_corners_str:
+            lines.append(f"- **Ideal Teórica (Trechos):** `{res.ideal_corners_str}` (Potencial na mesa: `{res.ideal_potential_gain_str}`)")
         if res.corners_with_gains > 0:
             lines.append(f"- **Curvas com Vantagem Positiva:** superou a referência em **{res.corners_with_gains} curva(s)**.")
         lines.append("")
@@ -775,6 +795,8 @@ class LapReportGenerator:
         lines.append(sub_sep)
         if res.total_potential_gain_s > 0:
             lines.append(f"Tempo Potencial Recuperável: ~{res.total_potential_gain_s:.2f}s em {res.corners_with_losses} curva(s).")
+        if res.ideal_corners_str:
+            lines.append(f"Ideal Teórica (Trechos)    : {res.ideal_corners_str} (Potencial na mesa: {res.ideal_potential_gain_str})")
         if res.corners_with_gains > 0:
             lines.append(f"Curvas com Ganho Positivo  : {res.corners_with_gains} curva(s) acima do benchmark.")
         lines.append("")

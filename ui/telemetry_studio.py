@@ -2,7 +2,7 @@
 ui/telemetry_studio.py — Estação de Análise de Telemetria Ponto a Ponto (MoTeC Style)
 =====================================================================================
 
-Módulo central do `main2.pyw`. Permite inspecionar a telemetria gravada ponto a ponto
+Módulo central do `ApexView_POS.pyw`. Permite inspecionar a telemetria gravada ponto a ponto
 com traçado 2D interativo, heatmap de frenagem e aceleração, marcadores de curvas e
 ápices, gráficos empilhados perfeitamente sincronizados, círculo de atrito G-G
 (friction circle), HUD de telemetria e reprodução em replay (0.25x a 2x).
@@ -1812,6 +1812,202 @@ class CornerTableWidget(QTableWidget):
 
 
 # ---------------------------------------------------------------------------
+# Diagnóstico Forense de Trail Braking (Widget XY: Freio vs. Volante)
+# ---------------------------------------------------------------------------
+class TrailBrakingStudioWidget(QWidget):
+    """
+    Diagnóstico Forense de Trail Braking (Gráfico Freio vs. Volante / Transition XY).
+    Plota a curva de Freio (%) no eixo Y versus Ângulo de Volante (°) no eixo X durante
+    a fase de entrada da curva inspecionada.
+    Sobrepõe a curva da volta ativa versus a volta de referência.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._corner_metrics: List[ca.CornerMetrics] = []
+        self._active_telemetry: dict = {}
+        self._ref_telemetry: dict = {}
+        self._corner_map: Optional[ca.CornerMap] = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        top_row = QHBoxLayout()
+        top_row.addWidget(QLabel("Curva:"))
+        self.combo_corner = QComboBox()
+        self.combo_corner.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {T.BG_INSET}; color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER}; padding: 3px 8px; font-size: 11px;
+            }}
+        """)
+        self.combo_corner.currentIndexChanged.connect(self._on_combo_changed)
+        top_row.addWidget(self.combo_corner, 1)
+
+        self.lbl_score_badge = QLabel("Linearidade: --")
+        self.lbl_score_badge.setFont(QFont(T.FONT_MONO, 10, QFont.Bold))
+        self.lbl_score_badge.setStyleSheet("color: #00e5ff;")
+        top_row.addWidget(self.lbl_score_badge)
+        layout.addLayout(top_row)
+
+        # Gráfico XY de Trail Braking
+        self.plot_xy = pg.PlotWidget()
+        self.plot_xy.showGrid(x=True, y=True, alpha=0.15)
+        self.plot_xy.setLabel('bottom', "Ângulo de Volante (|°|)")
+        self.plot_xy.setLabel('left', "Freio (%)")
+        self.plot_xy.setYRange(0, 105)
+        self.plot_xy.addLegend(offset=(10, 10))
+
+        self.curve_ref = self.plot_xy.plot(
+            pen=pg.mkPen(color="#ff9100", width=1.8, style=Qt.DashLine),
+            symbol='o', symbolSize=5, symbolBrush=pg.mkBrush("#ff9100"),
+            name="Referência"
+        )
+        self.curve_act = self.plot_xy.plot(
+            pen=pg.mkPen(color="#00e5ff", width=2.2),
+            symbol='o', symbolSize=6, symbolBrush=pg.mkBrush("#00e5ff"),
+            name="Volta Ativa"
+        )
+        layout.addWidget(self.plot_xy, 1)
+
+        # Diagnóstico
+        self.diag_frame = QFrame()
+        self.diag_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {T.BG_INSET};
+                border: 1px solid {T.BORDER};
+                padding: 4px;
+            }}
+        """)
+        diag_lay = QVBoxLayout(self.diag_frame)
+        diag_lay.setContentsMargins(6, 4, 6, 4)
+        diag_lay.setSpacing(2)
+
+        self.lbl_diag_act = QLabel("Ativa: Selecione uma curva.")
+        self.lbl_diag_act.setFont(QFont(T.FONT_MONO, 9))
+        self.lbl_diag_act.setStyleSheet("color: #00e5ff;")
+        self.lbl_diag_act.setWordWrap(True)
+        diag_lay.addWidget(self.lbl_diag_act)
+
+        self.lbl_diag_ref = QLabel("Referência: --")
+        self.lbl_diag_ref.setFont(QFont(T.FONT_MONO, 9))
+        self.lbl_diag_ref.setStyleSheet("color: #ff9100;")
+        self.lbl_diag_ref.setWordWrap(True)
+        diag_lay.addWidget(self.lbl_diag_ref)
+
+        self.lbl_anomalies = QLabel("Diagnóstico: --")
+        self.lbl_anomalies.setFont(QFont(T.FONT_MONO, 9, QFont.Bold))
+        self.lbl_anomalies.setStyleSheet("color: #ffffff;")
+        self.lbl_anomalies.setWordWrap(True)
+        diag_lay.addWidget(self.lbl_anomalies)
+
+        layout.addWidget(self.diag_frame)
+
+    def set_data(self, metrics: List[ca.CornerMetrics],
+                 active_telemetry: dict,
+                 ref_telemetry: Optional[dict] = None,
+                 corner_map: Optional[ca.CornerMap] = None):
+        self._corner_metrics = metrics or []
+        self._active_telemetry = active_telemetry or {}
+        self._ref_telemetry = ref_telemetry or {}
+        self._corner_map = corner_map
+
+        self.combo_corner.blockSignals(True)
+        cur_idx = self.combo_corner.currentIndex()
+        self.combo_corner.clear()
+
+        for idx, m in enumerate(self._corner_metrics):
+            name = m.corner.name if m.corner else f"Curva {idx + 1}"
+            self.combo_corner.addItem(f"{idx + 1}. {name}", idx)
+
+        if self.combo_corner.count() > 0:
+            target_idx = cur_idx if 0 <= cur_idx < self.combo_corner.count() else 0
+            self.combo_corner.setCurrentIndex(target_idx)
+        self.combo_corner.blockSignals(False)
+
+        self._refresh_plot()
+
+    def select_corner_by_index(self, corner_idx: int):
+        if 0 <= corner_idx < self.combo_corner.count():
+            self.combo_corner.setCurrentIndex(corner_idx)
+
+    def select_corner_by_distance(self, dist_m: float):
+        if not self._corner_metrics or not self._corner_map:
+            return
+        track_len = self._corner_map.track_length
+        for idx, m in enumerate(self._corner_metrics):
+            if m.corner:
+                s_m = m.corner.start_m(track_len)
+                e_m = m.corner.end_m(track_len)
+                if s_m - 120.0 <= dist_m <= e_m + 60.0:
+                    self.select_corner_by_index(idx)
+                    return
+
+    def _on_combo_changed(self):
+        self._refresh_plot()
+
+    def _refresh_plot(self):
+        idx = self.combo_corner.currentIndex()
+        if idx < 0 or idx >= len(self._corner_metrics):
+            self.curve_act.setData([], [])
+            self.curve_ref.setData([], [])
+            self.lbl_score_badge.setText("Linearidade: --")
+            self.lbl_diag_act.setText("Ativa: Nenhuma curva selecionada.")
+            self.lbl_diag_ref.setText("Referência: --")
+            self.lbl_anomalies.setText("Diagnóstico: --")
+            return
+
+        from core.driving_analysis import LapChannels, analyze_corner_trail_braking
+
+        m = self._corner_metrics[idx]
+        track_len = self._corner_map.track_length if self._corner_map else 1.0
+        start_m = m.corner.start_m(track_len) if m.corner else 0.0
+        end_m = m.corner.end_m(track_len) if m.corner else 100.0
+        c_name = m.corner.name if m.corner else f"Curva {idx + 1}"
+
+        # 1. Volta Ativa
+        ch_act = LapChannels(self._active_telemetry)
+        diag_act = analyze_corner_trail_braking(
+            ch_act, start_m, end_m, apex_m=m.v_min_m, corner_name=c_name, corner_index=idx + 1
+        )
+
+        if diag_act and diag_act.steer_points:
+            self.curve_act.setData(diag_act.steer_points, diag_act.brake_points)
+            self.lbl_score_badge.setText(f"Linearidade: {diag_act.linearity_score:.1f}%")
+            self.lbl_diag_act.setText(
+                f"Ativa: Co-ativação {diag_act.coactivation_pct:.0f}% ({diag_act.coactivation_duration_s:.2f}s) · "
+                f"Pico freio na curva: {diag_act.max_brake_during_turn:.0f}% · Soltura aos {diag_act.steer_at_brake_release_deg:.1f}°"
+            )
+            anom_txt = " · ".join(diag_act.anomalies) if diag_act.anomalies else "Padrão normal"
+            color = "#00e676" if diag_act.linearity_score >= 80 else ("#ffd600" if diag_act.linearity_score >= 50 else "#ff3333")
+            self.lbl_anomalies.setText(f"Diagnóstico: {anom_txt}")
+            self.lbl_anomalies.setStyleSheet(f"color: {color}; font-weight: bold;")
+        else:
+            self.curve_act.setData([], [])
+            self.lbl_diag_act.setText("Ativa: Sem dados de frenagem neste trecho.")
+            self.lbl_anomalies.setText("Diagnóstico: Sem frenagem registrada.")
+
+        # 2. Volta de Referência
+        if self._ref_telemetry and self._ref_telemetry.get("times"):
+            ch_ref = LapChannels(self._ref_telemetry)
+            diag_ref = analyze_corner_trail_braking(
+                ch_ref, start_m, end_m, apex_m=m.v_min_m, corner_name=c_name, corner_index=idx + 1
+            )
+            if diag_ref and diag_ref.steer_points:
+                self.curve_ref.setData(diag_ref.steer_points, diag_ref.brake_points)
+                self.lbl_diag_ref.setText(
+                    f"Referência: Linearidade {diag_ref.linearity_score:.1f}% · "
+                    f"Co-ativação {diag_ref.coactivation_pct:.0f}% · Soltura aos {diag_ref.steer_at_brake_release_deg:.1f}°"
+                )
+            else:
+                self.curve_ref.setData([], [])
+                self.lbl_diag_ref.setText("Referência: Sem dados de entrada.")
+        else:
+            self.curve_ref.setData([], [])
+            self.lbl_diag_ref.setText("Referência: Nenhuma volta de referência selecionada.")
+
+
+# ---------------------------------------------------------------------------
 # Janela Principal do Estúdio de Telemetria (TelemetryStudioWindow)
 # ---------------------------------------------------------------------------
 class TelemetryStudioWindow(QMainWindow):
@@ -1937,6 +2133,8 @@ class TelemetryStudioWindow(QMainWindow):
             }}
         """)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         layout.addWidget(self.tree, 1)
 
         lbl_ref = QLabel("VOLTA DE COMPARAÇÃO (DELTA):")
@@ -1957,6 +2155,19 @@ class TelemetryStudioWindow(QMainWindow):
         btn_layout = QVBoxLayout()
         btn_layout.setSpacing(4)
 
+        btn_import = QPushButton("📥 IMPORTAR VOLTA (.apex)")
+        btn_import.setCursor(Qt.PointingHandCursor)
+        btn_import.setToolTip("Importa arquivo de volta externa (.apex / .lap.json.gz) para o catálogo")
+        btn_import.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {T.BG_HEADER}; color: #00e676;
+                border: 1px solid #00e676; padding: 6px; font-weight: bold; font-size: 11px;
+            }}
+            QPushButton:hover {{ background-color: #00e676; color: #000; }}
+        """)
+        btn_import.clicked.connect(self._on_import_lap)
+        btn_layout.addWidget(btn_import)
+
         btn_demo = QPushButton("⚡ CARREGAR VOLTA DEMO (MOCK)")
         btn_demo.setCursor(Qt.PointingHandCursor)
         btn_demo.setStyleSheet(f"""
@@ -1971,6 +2182,7 @@ class TelemetryStudioWindow(QMainWindow):
 
         row_actions = QHBoxLayout()
         for text, slot in (("ATUALIZAR", self.reload_catalog),
+                           ("EXPORTAR (.apex)", self._on_export_apex),
                            ("RELATÓRIO", self._on_export_report),
                            ("MoTeC", self._on_export_motec)):
             b = QPushButton(text)
@@ -2005,6 +2217,11 @@ class TelemetryStudioWindow(QMainWindow):
         self.lbl_session_title.setFont(QFont(T.FONT_UI, 11, QFont.Bold))
         self.lbl_session_title.setStyleSheet("color: #ffffff;")
         top_bar.addWidget(self.lbl_session_title, 1)
+
+        self.lbl_ideal_corners = QLabel("Ideal Teórica (Trechos): --:--.--- (Potencial na mesa: -0.000 s)")
+        self.lbl_ideal_corners.setFont(QFont(T.FONT_MONO, 9, QFont.Bold))
+        self.lbl_ideal_corners.setStyleSheet("color: #00e5ff; background-color: #002b36; border: 1px solid #005b66; padding: 3px 8px;")
+        top_bar.addWidget(self.lbl_ideal_corners)
 
         top_bar.addWidget(QLabel("Traçado:"))
         self.combo_heat = QComboBox()
@@ -2092,10 +2309,13 @@ class TelemetryStudioWindow(QMainWindow):
         self.corner_table = CornerTableWidget()
         self.corner_table.sig_corner_clicked.connect(self._on_corner_clicked)
 
+        self.trail_braking_widget = TrailBrakingStudioWidget()
+
         self.micro_table = MicroSectorTableWidget()
         self.micro_table.sig_micro_clicked.connect(self._on_micro_clicked)
 
         self.tables_tabs.addTab(self.corner_table, "🏁 Curvas")
+        self.tables_tabs.addTab(self.trail_braking_widget, "🎯 Trail Braking (XY)")
         self.tables_tabs.addTab(self.micro_table, "⚡ Micro-setores (24)")
         bottom_box.addWidget(self.tables_tabs, 1)
 
@@ -2272,6 +2492,8 @@ class TelemetryStudioWindow(QMainWindow):
         if len(distances) >= 2:
             idx = min(bisect.bisect_left(distances, dist_m), len(distances) - 1)
             self._on_point_seek(idx)
+        if hasattr(self, 'trail_braking_widget'):
+            self.trail_braking_widget.select_corner_by_distance(dist_m)
 
     def _on_micro_clicked(self, dist_m: float):
         distances = self.current_tel.get("distance") or []
@@ -2861,6 +3083,11 @@ class TelemetryStudioWindow(QMainWindow):
         self.track_map.set_lap_data(self.current_tel, self.corner_map, self.corner_metrics)
         self.corner_table.populate(self.corner_metrics, self.corner_comparisons,
                                    speeds=self.current_tel.get("speed"), distances=distances)
+        if hasattr(self, 'trail_braking_widget'):
+            self.trail_braking_widget.set_data(
+                self.corner_metrics, self.current_tel, self.ref_tel, self.corner_map
+            )
+        self._update_ideal_corners_label()
         self.playback.set_total_points(self.track_map.total_points)
 
         # Configura a nuvem G-G Pós-Treino
@@ -2936,6 +3163,11 @@ class TelemetryStudioWindow(QMainWindow):
         self.track_map.set_reference_lap_data(self.ref_tel)
         self.corner_table.populate(self.corner_metrics, self.corner_comparisons,
                                    speeds=self.current_tel.get("speed"), distances=self.current_tel.get("distance"))
+        if hasattr(self, 'trail_braking_widget'):
+            self.trail_braking_widget.set_data(
+                self.corner_metrics, self.current_tel, self.ref_tel, self.corner_map
+            )
+        self._update_ideal_corners_label()
 
         ref_lat = self.ref_tel.get("g_lat") or [] if self.ref_tel else []
         ref_lon = self.ref_tel.get("g_lon") or [] if self.ref_tel else []
@@ -3155,6 +3387,11 @@ class TelemetryStudioWindow(QMainWindow):
         self.track_map.set_reference_lap_data(ref_tel)
         self.corner_table.populate(self.corner_metrics, self.corner_comparisons,
                                    speeds=act_tel.get("speed"), distances=act_tel.get("distance"))
+        if hasattr(self, 'trail_braking_widget'):
+            self.trail_braking_widget.set_data(
+                self.corner_metrics, act_tel, ref_tel, self.corner_map
+            )
+        self._update_ideal_corners_label()
         self.playback.set_total_points(self.track_map.total_points)
 
         self.hud.set_lap_g_data(act_tel.get("g_lat"), act_tel.get("g_lon"),
@@ -3191,6 +3428,77 @@ class TelemetryStudioWindow(QMainWindow):
                 path += ".ld"
             if self.library.export_motec(self.current_track, self.current_car, self.current_rec, path):
                 self.lbl_status.setText(f"Exportado MoTeC: {os.path.basename(path)}")
+
+    def _update_ideal_corners_label(self):
+        try:
+            from core.corner_bests import CornerBestStore
+            store = CornerBestStore(self.library)
+            summary = store.get_summary(self.current_track, self.current_car,
+                                        corners=self.corner_map.corners if self.corner_map else None,
+                                        track_length=self.corner_map.track_length if self.corner_map else 0.0)
+            if summary and summary.ideal_time_s > 0:
+                self.lbl_ideal_corners.setText(f"Ideal Teórica (Trechos): {summary.ideal_time_str} (Potencial na mesa: {summary.delta_str})")
+            else:
+                self.lbl_ideal_corners.setText("Ideal Teórica (Trechos): --:--.--- (Potencial na mesa: -0.000 s)")
+        except Exception:
+            self.lbl_ideal_corners.setText("Ideal Teórica (Trechos): --:--.--- (Potencial na mesa: -0.000 s)")
+
+    def _on_tree_context_menu(self, pos):
+        item = self.tree.itemAt(pos)
+        if not item:
+            return
+        track_car_lap = item.data(0, Qt.UserRole)
+        if not track_car_lap:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {T.BG_PANEL}; color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER}; font-size: 11px;
+            }}
+            QMenu::item {{ padding: 4px 12px; }}
+            QMenu::item:selected {{ background-color: {T.BG_HEADER}; color: #ffffff; }}
+        """)
+        act_export = menu.addAction("📦 Exportar Pacote de Volta (.apex)")
+        act_report = menu.addAction("📊 Relatório de Desempenho")
+        action = menu.exec_(self.tree.viewport().mapToGlobal(pos))
+        if action == act_export:
+            self._on_export_apex()
+        elif action == act_report:
+            self._on_export_report()
+
+    def _on_import_lap(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Importar Pacote de Volta", "",
+            "Pacote de Volta Apex (*.apex *.lap.json.gz *.json.gz *.json);;Todos os Arquivos (*.*)"
+        )
+        if not path:
+            return
+        rec = self.library.import_lap_file(path)
+        if rec:
+            self.reload_catalog()
+            self.lbl_status.setText(f"Volta importada com sucesso: {rec.track} · {rec.car} ({rec.lap_time_str})")
+            self.load_lap(rec.track, rec.car, rec)
+        else:
+            self.lbl_status.setText("Erro ao importar pacote de volta.")
+
+    def _on_export_apex(self):
+        if not self.current_rec:
+            self.lbl_status.setText("Selecione uma volta para exportar o pacote .apex.")
+            return
+        track = self.current_track or self.current_rec.track
+        car = self.current_car or self.current_rec.car
+        sugestao = f"{track}_{car}_L{self.current_rec.lap_number}_{self.current_rec.lap_time_str.replace(':', '-').replace('.', '-')}.apex"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exportar Pacote de Volta (.apex)", sugestao,
+            "Pacote de Volta Apex (*.apex);;Todos os Arquivos (*.*)"
+        )
+        if not path:
+            return
+        if self.library.export_lap_file(track, car, self.current_rec, path):
+            self.lbl_status.setText(f"Pacote .apex exportado: {os.path.basename(path)}")
+        else:
+            self.lbl_status.setText("Erro ao exportar pacote .apex.")
 
 
 def main():

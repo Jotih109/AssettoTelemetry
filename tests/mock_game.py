@@ -6,13 +6,17 @@ Gera telemetria gravando diretamente na memória compartilhada do Windows
 usando as estruturas nativas do Assetto Corsa 1.
 
 COMO USAR:
-  1. Terminal A: python mock_game.py
-  2. Terminal B: python main.pyw (com MOCK_MODE = False)
+  1. Terminal A: python tests/mock_game.py
+  2. Terminal B: python ApexView.pyw --no-mock
 """
 
 import time
 import mmap
 import ctypes
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from providers.assettocorsa import SPageFilePhysics, SPageFileGraphic, SPageFileStatic
 from providers.mock import MockTelemetryProvider

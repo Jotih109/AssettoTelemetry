@@ -1,6 +1,6 @@
 """
-main2.pyw — Estação de Análise de Telemetria Ponto a Ponto (MoTeC Style Telemetry Studio)
-=======================================================================================
+ApexView_POS.pyw — Estação de Análise de Telemetria Ponto a Ponto (MoTeC Style Telemetry Studio)
+=============================================================================================
 
 Ponto de entrada dedicado para análise detalhada de telemetria offline e pós-sessão,
 focado na experiência de engenharia de corrida real (estilo MoTeC i2 Pro, VRS, Popometer):
@@ -18,7 +18,7 @@ focado na experiência de engenharia de corrida real (estilo MoTeC i2 Pro, VRS, 
   * Comparação com Volta Rápida: sobreponha duas voltas com dois carros na pista e deltas de tempo.
 
 Como executar:
-    python main2.pyw
+    python ApexView_POS.pyw
 """
 
 import argparse
@@ -47,7 +47,7 @@ def main():
     _install_crash_guard()
 
     parser = argparse.ArgumentParser(
-        prog="main2.pyw", add_help=True,
+        prog="ApexView_POS.pyw", add_help=True,
         description="ApexView Telemetry Studio — Análise Ponto a Ponto de Telemetria"
     )
     parser.add_argument("--demo", action="store_true", help="Inicia carregando a volta de demonstração")

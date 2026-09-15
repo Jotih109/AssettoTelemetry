@@ -136,6 +136,7 @@ class LapRecord:
     track: str = ""
     car: str = ""
     session_id: str = ""
+    session_type: str = ""          # Practice / Qualify / Race / Hotlap
     lap_number: int = 0
     lap_time_str: str = ""
     lap_time_ms: int = 0
@@ -173,10 +174,66 @@ class LapRecord:
                 and not self.pit_lap)
 
     @property
+    def day_key(self) -> str:
+        """Chave de data em formato ISO YYYY-MM-DD para agrupamento e ordenação."""
+        if not self.timestamp:
+            return "Sem Data"
+        try:
+            return self.timestamp[:10]
+        except Exception:
+            return "Sem Data"
+
+    @property
+    def day_display(self) -> str:
+        """Texto amigável do dia (Hoje, Ontem, ou DD/MM/AAAA - Dia da Semana)."""
+        if not self.timestamp:
+            return "Data Desconhecida"
+        try:
+            clean_ts = self.timestamp.replace("Z", "").replace(" ", "T")
+            dt = datetime.fromisoformat(clean_ts)
+            today = datetime.now().date()
+            d = dt.date()
+            d_str = dt.strftime("%d/%m/%Y")
+            dias_semana = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
+            dia_sem = dias_semana[dt.weekday()]
+            diff = (today - d).days
+            if diff == 0:
+                return f"Hoje · {d_str} ({dia_sem})"
+            elif diff == 1:
+                return f"Ontem · {d_str} ({dia_sem})"
+            else:
+                return f"{d_str} · {dia_sem}"
+        except Exception:
+            return self.timestamp[:10] if len(self.timestamp) >= 10 else "Sem Data"
+
+    @property
+    def session_display_name(self) -> str:
+        """Nome de exibição da sessão com horário e tipo (ex: 'Sessão 14:35 · Practice')."""
+        hora = ""
+        try:
+            clean_ts = self.timestamp.replace("Z", "").replace(" ", "T")
+            dt = datetime.fromisoformat(clean_ts)
+            hora = dt.strftime("%H:%M")
+        except Exception:
+            pass
+
+        tipo = (self.session_type or "").strip()
+        if tipo and hora:
+            return f"Sessão {hora} · {tipo}"
+        elif tipo:
+            return f"Sessão · {tipo}"
+        elif hora:
+            return f"Sessão {hora}"
+        elif self.session_id:
+            return f"Sessão {self.session_id}"
+        return "Sessão Única"
+
+    @property
     def date_str(self) -> str:
         """Data legível (dd/mm HH:MM) a partir do timestamp ISO."""
         try:
-            return datetime.fromisoformat(self.timestamp).strftime("%d/%m %H:%M")
+            clean_ts = self.timestamp.replace("Z", "").replace(" ", "T")
+            return datetime.fromisoformat(clean_ts).strftime("%d/%m %H:%M")
         except (ValueError, TypeError):
             return ""
 
@@ -468,6 +525,7 @@ class LapLibrary:
             track=meta.get("track", track) or track,
             car=meta.get("car", car) or car,
             session_id=meta.get("session_id", "") or "",
+            session_type=meta.get("session_type", "") or "",
             lap_number=int(meta.get("lap_number", 0) or 0),
             lap_time_str=lap_time_str,
             lap_time_ms=parse_lap_time_ms(lap_time_str),
@@ -518,6 +576,7 @@ class LapLibrary:
     def save_lap(self, track: str, car: str, *, telemetry: dict,
                  lap_time_str: str, sector_times_ms: List[int],
                  lap_number: int = 0, session_id: str = "",
+                 session_type: str = "",
                  full_lap: bool = False, valid: bool = True,
                  pit_lap: bool = False, manual: bool = False,
                  extra_metadata: Optional[dict] = None) -> Optional[LapRecord]:
@@ -535,8 +594,11 @@ class LapLibrary:
         now = datetime.now()
         stamp = now.strftime("%Y%m%d-%H%M%S")
         base_id = _SAFE_ID.sub("_", f"{stamp}_L{lap_number:03d}"
-                               if lap_number else stamp)
+                                if lap_number else stamp)
         lap_id, rel_file = self._unique_lap_id(track, car, base_id)
+
+        if not session_type and extra_metadata and "session_type" in extra_metadata:
+            session_type = str(extra_metadata.get("session_type") or "")
 
         meta = {
             "track": clean_name(track, "UnknownTrack"),
@@ -546,6 +608,7 @@ class LapLibrary:
             "timestamp": now.isoformat(timespec="seconds"),
             "lap_number": lap_number,
             "session_id": session_id,
+            "session_type": session_type,
             "manual_save": manual,
             "full_lap": full_lap,
             "valid": valid,
@@ -553,6 +616,8 @@ class LapLibrary:
         }
         if extra_metadata:
             meta.update(extra_metadata)
+            if "session_type" in extra_metadata and not meta.get("session_type"):
+                meta["session_type"] = str(extra_metadata["session_type"] or "")
 
         payload = {"metadata": meta, "telemetry": compact_telemetry(telemetry)}
         blob = gzip.compress(
@@ -566,6 +631,7 @@ class LapLibrary:
             file=rel_file.replace("\\", "/"),
             track=meta["track"], car=meta["car"],
             session_id=session_id,
+            session_type=meta.get("session_type", ""),
             lap_number=lap_number,
             lap_time_str=lap_time_str,
             lap_time_ms=parse_lap_time_ms(lap_time_str),
@@ -717,6 +783,21 @@ class LapLibrary:
                     "bytes": self.disk_usage(track, car),
                 })
         return out
+
+    def all_records(self) -> List[LapRecord]:
+        """Devolve todas as voltas registradas em todas as pistas e carros."""
+        all_recs: List[LapRecord] = []
+        if not os.path.isdir(self.data_dir):
+            return all_recs
+        for track in sorted(os.listdir(self.data_dir)):
+            track_dir = os.path.join(self.data_dir, track)
+            if not os.path.isdir(track_dir):
+                continue
+            for car in sorted(os.listdir(track_dir)):
+                if not os.path.isdir(os.path.join(track_dir, car)):
+                    continue
+                all_recs.extend(self.records(track, car))
+        return all_recs
 
     def disk_usage(self, track: str = "", car: str = "") -> int:
         """Bytes ocupados pelas voltas (a pasta toda quando sem argumentos)."""

@@ -787,11 +787,13 @@ class SessionManager:
             sector_times_ms=list(sector_times),
             lap_number=lap_number,
             session_id=self.session_id,
+            session_type=self.session_type,
             full_lap=full_lap,
             valid=valid,
             pit_lap=pit_lap,
             manual=manual,
-            extra_metadata={"track_length": getattr(state, "track_length", 0.0)},
+            extra_metadata={"track_length": getattr(state, "track_length", 0.0),
+                            "session_type": self.session_type},
         )
         if record is None:
             return None

@@ -21,12 +21,12 @@ from PyQt5.QtWidgets import (
     QSplitter, QPushButton, QTreeWidget, QTreeWidgetItem, QFileDialog,
     QAbstractItemView, QComboBox, QMenu, QDialog, QTextEdit, QProgressBar,
     QSlider, QTableWidget, QTableWidgetItem, QHeaderView, QFrame, QCheckBox,
-    QButtonGroup, QRadioButton, QShortcut, QTabWidget,
+    QButtonGroup, QRadioButton, QShortcut, QTabWidget, QLineEdit,
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPointF, QRectF, QLineF
 from PyQt5.QtGui import (
     QColor, QPainter, QPen, QBrush, QFont, QKeySequence, QLinearGradient,
-    QPainterPath, QPolygonF,
+    QPainterPath, QPolygonF, QPixmap,
 )
 import pyqtgraph as pg
 import numpy as np
@@ -60,10 +60,9 @@ def _clamp(val: float, low: float, high: float) -> float:
 # ---------------------------------------------------------------------------
 class GGCircleWidget(QWidget):
     """
-    Mostrador 2D das Forças G (Lateral vs Longitudinal).
-    Exibe os círculos de 0.5G, 1.0G, 1.5G e 2.0G, o rastro recente e a posição
-    instantânea do carro. Indispensável em telemetria real para avaliar trail
-    braking e aproveitamento da aderência dos pneus.
+    Mostrador 2D das Forças G (Lateral vs Longitudinal) com Círculo de Atrito (MoTeC Friction Circle).
+    No modo 'Pós-Treino', renderiza uma nuvem de dispersão (scatter plot) completa da volta
+    com baixa opacidade (alpha 0.15 a 0.30), com o ponto instantâneo em destaque por cima.
     """
 
     def __init__(self, max_g: float = 2.0, parent=None):
@@ -72,7 +71,16 @@ class GGCircleWidget(QWidget):
         self.current_lat_g = 0.0
         self.current_lon_g = 0.0
         self.trail: List[Tuple[float, float]] = []
+        self.post_session_mode: bool = True
+        self.all_lat_g: List[float] = []
+        self.all_lon_g: List[float] = []
+        self.ref_lat_g: List[float] = []
+        self.ref_lon_g: List[float] = []
+        self._cached_scatter_pixmap: Optional[QPixmap] = None
+        self._pixmap_size: Tuple[int, int] = (0, 0)
         self.setMinimumSize(130, 130)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Diagrama G-G (Círculo de Atrito).\nClique para alternar entre Modo Pós-Treino (Nuvem G) e Modo Instantâneo.")
         self.setStyleSheet(f"background-color: {T.BG_INSET}; border: 1px solid {T.BORDER};")
 
     def set_g_force(self, lat_g: float, lon_g: float, trail: Optional[List[Tuple[float, float]]] = None):
@@ -81,6 +89,90 @@ class GGCircleWidget(QWidget):
         if trail is not None:
             self.trail = trail
         self.update()
+
+    def set_lap_g_data(self, lat_g: List[float], lon_g: List[float],
+                       ref_lat_g: Optional[List[float]] = None,
+                       ref_lon_g: Optional[List[float]] = None):
+        self.all_lat_g = lat_g or []
+        self.all_lon_g = lon_g or []
+        self.ref_lat_g = ref_lat_g or []
+        self.ref_lon_g = ref_lon_g or []
+        self._render_scatter_cache()
+        self.update()
+
+    def set_post_session_mode(self, enabled: bool):
+        self.post_session_mode = enabled
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.post_session_mode = not self.post_session_mode
+            self.update()
+        else:
+            super().mousePressEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._render_scatter_cache()
+
+    def _render_scatter_cache(self):
+        w = self.width()
+        h = self.height()
+        if w <= 10 or h <= 10 or not self.all_lat_g:
+            self._cached_scatter_pixmap = None
+            return
+
+        pixmap = QPixmap(w, h)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        side = min(w, h) - 16
+        radius = side / 2.0
+        cx = w / 2.0
+        cy = h / 2.0
+
+        # 1. Nuvem da volta de referência (se existir) em âmbar translúcido
+        if self.ref_lat_g and self.ref_lon_g:
+            ref_n = min(len(self.ref_lat_g), len(self.ref_lon_g))
+            step_ref = max(1, ref_n // 800)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor(255, 145, 0, 45)))  # alpha ~ 0.18
+            for i in range(0, ref_n, step_ref):
+                lat = self.ref_lat_g[i]
+                lon = self.ref_lon_g[i]
+                px = cx + (lat / self.max_g) * radius
+                py = cy - (lon / self.max_g) * radius
+                painter.drawEllipse(QPointF(px, py), 1.8, 1.8)
+
+        # 2. Nuvem da volta ativa (alpha 0.20 a 0.25)
+        act_n = min(len(self.all_lat_g), len(self.all_lon_g))
+        step_act = max(1, act_n // 1000)
+        painter.setPen(Qt.NoPen)
+
+        brush_brake = QBrush(QColor(255, 23, 68, 55))    # Frenagem (vermelho translúcido)
+        brush_gas   = QBrush(QColor(0, 230, 118, 55))    # Aceleração (verde translúcido)
+        brush_lat   = QBrush(QColor(0, 229, 255, 55))    # Curva / Ciano translúcido
+
+        for i in range(0, act_n, step_act):
+            lat = self.all_lat_g[i]
+            lon = self.all_lon_g[i]
+            px = cx + (lat / self.max_g) * radius
+            py = cy - (lon / self.max_g) * radius
+
+            if lon < -0.30:
+                painter.setBrush(brush_brake)
+            elif lon > 0.30:
+                painter.setBrush(brush_gas)
+            else:
+                painter.setBrush(brush_lat)
+
+            painter.drawEllipse(QPointF(px, py), 2.2, 2.2)
+
+        painter.end()
+        self._cached_scatter_pixmap = pixmap
+        self._pixmap_size = (w, h)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -123,6 +215,13 @@ class GGCircleWidget(QWidget):
         painter.drawText(int(cx + 3), int(cy - radius + 10), "+LON")
         painter.drawText(int(cx + 3), int(cy + radius - 3), "FREIO")
 
+        # Nuvem de dispersão Pós-Treino (Scatter Plot)
+        if self.post_session_mode:
+            if self._cached_scatter_pixmap is None or self._pixmap_size != (w, h):
+                self._render_scatter_cache()
+            if self._cached_scatter_pixmap is not None:
+                painter.drawPixmap(0, 0, self._cached_scatter_pixmap)
+
         # Rastro dos pontos recentes (trail)
         if self.trail:
             n = len(self.trail)
@@ -134,7 +233,7 @@ class GGCircleWidget(QWidget):
                 painter.setBrush(QColor(0, 229, 255, alpha))
                 painter.drawEllipse(QPointF(px, py), 2.0, 2.0)
 
-        # Ponto atual instantâneo
+        # Ponto atual instantâneo em destaque
         px = cx + (self.current_lat_g / self.max_g) * radius
         py = cy - (self.current_lon_g / self.max_g) * radius
         px = _clamp(px, cx - radius, cx + radius)
@@ -151,7 +250,7 @@ class GGCircleWidget(QWidget):
         # Halo
         painter.setPen(Qt.NoPen)
         halo_color = QColor(dot_color)
-        halo_color.setAlpha(80)
+        halo_color.setAlpha(90)
         painter.setBrush(halo_color)
         painter.drawEllipse(QPointF(px, py), 7, 7)
 
@@ -165,6 +264,15 @@ class GGCircleWidget(QWidget):
         painter.setPen(QColor(T.TXT_VALUE))
         tot_g = math.hypot(self.current_lat_g, self.current_lon_g)
         painter.drawText(8, 14, f"{tot_g:.2f} G")
+
+        # Badge do modo
+        painter.setFont(QFont(T.FONT_UI, 7, QFont.Bold))
+        if self.post_session_mode:
+            painter.setPen(QColor("#00e5ff"))
+            painter.drawText(w - 72, 14, "PÓS-TREINO")
+        else:
+            painter.setPen(QColor(T.TXT_UNIT))
+            painter.drawText(w - 55, 14, "INSTANT")
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +549,11 @@ class PointInspectorWidget(QFrame):
 
         trail = data.get("trail_g", None)
         self.gg_widget.set_g_force(lat_g, lon_g, trail)
+
+    def set_lap_g_data(self, lat_g: List[float], lon_g: List[float],
+                       ref_lat_g: Optional[List[float]] = None,
+                       ref_lon_g: Optional[List[float]] = None):
+        self.gg_widget.set_lap_g_data(lat_g, lon_g, ref_lat_g, ref_lon_g)
 
 
 # ---------------------------------------------------------------------------
@@ -1640,15 +1753,29 @@ class CornerTableWidget(QTableWidget):
 
             c_name = m.corner.name if m.corner else f"Curva {row + 1}"
             
-            init_spd_str = ""
-            if m.braking_point_m is not None and distances and speeds:
+            spd_val = getattr(m, 'braking_speed', None)
+            if spd_val is None and m.braking_point_m is not None and distances and speeds:
                 idx = bisect.bisect_left(distances, m.braking_point_m)
                 if 0 <= idx < len(speeds):
-                    init_spd_str = f" ({speeds[idx]:.0f} km/h)"
-            
-            brk_str = f"{m.braking_point_m:.0f} m{init_spd_str}" if m.braking_point_m is not None else "--"
+                    spd_val = speeds[idx]
+
+            init_spd_str = f" ({spd_val:.0f} km/h)" if spd_val is not None else ""
+            if m.braking_point_m is not None:
+                brk_str = f"{m.braking_point_m:.0f} m{init_spd_str}"
+            else:
+                brk_str = "Pleno / Sem freio"
+
             vmin_str = f"{m.v_min:.1f} km/h" if m.v_min is not None else "--"
-            gas_str = f"{m.throttle_point_m:.0f} m" if m.throttle_point_m is not None else "--"
+            
+            thr_pct = getattr(m, 'throttle_pct', None)
+            if m.throttle_point_m is not None:
+                pct_str = f" ({thr_pct:.0f}%)" if thr_pct is not None else " (100%)"
+                gas_str = f"{m.throttle_point_m:.0f} m{pct_str}"
+            elif thr_pct is not None and thr_pct >= 15.0:
+                gas_str = f"Parcial ({thr_pct:.0f}%)"
+            else:
+                gas_str = "--"
+
             time_str = f"{m.section_time:.3f} s" if m.section_time is not None else "--"
 
             delta_str = "--"
@@ -1658,7 +1785,7 @@ class CornerTableWidget(QTableWidget):
                 if cp.delta_time is not None:
                     d = cp.delta_time
                     delta_str = f"{d:+.3f} s"
-                    delta_color = QColor("#ff1744") if d > 0.01 else (QColor("#00e676") if d < -0.01 else QColor(T.TXT_VALUE))
+                    delta_color = QColor("#ff1744") if d > 0.005 else (QColor("#00e676") if d < -0.005 else QColor(T.TXT_VALUE))
 
             item_name = QTableWidgetItem(c_name)
             dist_m = m.braking_point_m if m.braking_point_m is not None else (m.corner.start_m(1.0) if m.corner else 0.0)
@@ -1704,6 +1831,9 @@ class TelemetryStudioWindow(QMainWindow):
 
         self.ref_rec: Optional[LapRecord] = None
         self.ref_tel: dict = {}
+
+        self._mock_telemetries: Dict[str, dict] = {}
+        self._demo_records: List[LapRecord] = []
 
         self.corner_map: Optional[ca.CornerMap] = None
         self.corner_metrics: List[ca.CornerMetrics] = []
@@ -1756,8 +1886,43 @@ class TelemetryStudioWindow(QMainWindow):
         title.setStyleSheet(f"color: {T.TXT_TITLE};")
         layout.addWidget(title)
 
+        # Seletor de Modo de Agrupamento (Data / Pista / Carro)
+        lbl_mode = QLabel("ORGANIZAÇÃO:")
+        lbl_mode.setFont(T.f_title(7))
+        lbl_mode.setStyleSheet(f"color: {T.TXT_UNIT};")
+        layout.addWidget(lbl_mode)
+
+        self.combo_tree_mode = QComboBox()
+        self.combo_tree_mode.addItem("📅 Por Data (Dia ➔ Pista ➔ Carro)", "date")
+        self.combo_tree_mode.addItem("🏁 Por Pista (Pista ➔ Carro ➔ Data)", "track")
+        self.combo_tree_mode.addItem("🏎️ Por Carro (Carro ➔ Pista ➔ Data)", "car")
+        self.combo_tree_mode.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {T.BG_INSET}; color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER}; padding: 3px 5px; font-size: 11px;
+            }}
+            QComboBox::drop-down {{ border: none; }}
+        """)
+        self.combo_tree_mode.currentIndexChanged.connect(self._on_tree_mode_changed)
+        layout.addWidget(self.combo_tree_mode)
+
+        # Campo de Busca / Filtro em Tempo Real
+        self.txt_filter = QLineEdit()
+        self.txt_filter.setPlaceholderText("🔍 Filtrar pista, carro, data...")
+        self.txt_filter.setClearButtonEnabled(True)
+        self.txt_filter.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {T.BG_INSET}; color: {T.TXT_VALUE};
+                border: 1px solid {T.BORDER}; padding: 3px 6px; font-size: 11px;
+                border-radius: 2px;
+            }}
+            QLineEdit:focus {{ border: 1px solid #00e5ff; }}
+        """)
+        self.txt_filter.textChanged.connect(self._on_tree_filter_changed)
+        layout.addWidget(self.txt_filter)
+
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Volta", "Tempo", "Data"])
+        self.tree.setHeaderLabels(["Volta / Sessão", "Tempo", "Data / Detalhe"])
         self.tree.setColumnWidth(0, 150)
         self.tree.setColumnWidth(1, 75)
         self.tree.setStyleSheet(f"""
@@ -2007,8 +2172,12 @@ class TelemetryStudioWindow(QMainWindow):
 
         ref_idx = 0
         ref_dists = self.ref_tel.get("distance") or []
-        if len(ref_dists) >= 2:
-            ref_idx = min(bisect.bisect_left(ref_dists, cur_dist), len(ref_dists) - 1)
+        if len(ref_dists) >= 2 and len(distances) >= 2:
+            tot_act = float(distances[-1]) if distances[-1] > 0 else 1.0
+            tot_ref = float(ref_dists[-1]) if ref_dists[-1] > 0 else 1.0
+            norm_p = _clamp(cur_dist / tot_act, 0.0, 1.0)
+            target_ref_dist = norm_p * tot_ref
+            ref_idx = min(bisect.bisect_left(ref_dists, target_ref_dist), len(ref_dists) - 1)
 
         self.track_map.set_selected_index(idx, ref_idx)
 
@@ -2112,6 +2281,63 @@ class TelemetryStudioWindow(QMainWindow):
 
     # -- Redesenho dos Gráficos ---------------------------------------------
 
+    def _plot_bicolor_delta(self, plot, x: np.ndarray, y: np.ndarray):
+        """
+        Renderiza o canal de Delta temporal (Δt) dividido em trechos verdes e vermelhos:
+          * Delta > 0 (subindo): a volta ativa está perdendo tempo -> renderizar em VERMELHO (#ff3333)
+          * Delta < 0 (descendo): a volta ativa está ganhando tempo -> renderizar em VERDE (#00e676)
+        Interpola com precisão os cruzamentos com a linha zero para continuidade perfeita.
+        """
+        n = len(x)
+        if n < 2:
+            return
+
+        pen_pos = pg.mkPen("#ff3333", width=2.0)
+        pen_neg = pg.mkPen("#00e676", width=2.0)
+        brush_pos = pg.mkBrush(255, 51, 51, 35)
+        brush_neg = pg.mkBrush(0, 230, 118, 35)
+
+        curr_sign = None  # 1 para >= 0, -1 para < 0
+        curr_x = []
+        curr_y = []
+
+        for i in range(n):
+            val = float(y[i])
+            sign = 1 if val >= 0 else -1
+
+            if curr_sign is None:
+                curr_sign = sign
+                curr_x.append(float(x[i]))
+                curr_y.append(val)
+            elif sign == curr_sign:
+                curr_x.append(float(x[i]))
+                curr_y.append(val)
+            else:
+                x_prev, y_prev = curr_x[-1], curr_y[-1]
+                x_curr, y_curr = float(x[i]), val
+                denom = y_curr - y_prev
+                if denom != 0:
+                    t = -y_prev / denom
+                    x_zero = x_prev + t * (x_curr - x_prev)
+                else:
+                    x_zero = x_prev
+
+                curr_x.append(x_zero)
+                curr_y.append(0.0)
+
+                pen = pen_pos if curr_sign == 1 else pen_neg
+                brush = brush_pos if curr_sign == 1 else brush_neg
+                plot.plot(curr_x, curr_y, pen=pen, fillLevel=0.0, fillBrush=brush)
+
+                curr_sign = sign
+                curr_x = [x_zero, x_curr]
+                curr_y = [0.0, val]
+
+        if curr_x:
+            pen = pen_pos if curr_sign == 1 else pen_neg
+            brush = brush_pos if curr_sign == 1 else brush_neg
+            plot.plot(curr_x, curr_y, pen=pen, fillLevel=0.0, fillBrush=brush)
+
     def redraw_charts(self):
         for p in self.plots.values():
             p.clear()
@@ -2129,22 +2355,22 @@ class TelemetryStudioWindow(QMainWindow):
         if n < 2:
             return
 
-        # 1. Velocidade
+        # 1. Velocidade (Ciano sólido vs Âmbar tracejado)
         spd = self.current_tel.get("speed") or []
-        self.plots["speed"].plot(x[:len(spd)], spd[:n], pen=pg.mkPen(LAP_COLOR_MAIN, width=1.5))
+        self.plots["speed"].plot(x[:len(spd)], spd[:n], pen=pg.mkPen(LAP_COLOR_MAIN, width=2.0))
 
         if self.ref_tel:
             ref_x = self.ref_tel.get("distance") or []
             ref_spd = self.ref_tel.get("speed") or []
             if len(ref_x) >= 2:
                 self.plots["speed"].plot(ref_x[:len(ref_spd)], ref_spd,
-                                         pen=pg.mkPen(LAP_COLOR_REF, width=1.2, style=Qt.DashLine))
+                                         pen=pg.mkPen(LAP_COLOR_REF, width=1.8, style=Qt.DashLine))
 
         # 2. Pedais (Acelerador Verde + Freio Vermelho)
         gas = [g * 100.0 for g in (self.current_tel.get("gas") or [])]
         brk = [b * 100.0 for b in (self.current_tel.get("brake") or [])]
-        self.plots["pedals"].plot(x[:len(gas)], gas[:n], pen=pg.mkPen("#00e676", width=1.5))
-        self.plots["pedals"].plot(x[:len(brk)], brk[:n], pen=pg.mkPen("#ff1744", width=1.5))
+        self.plots["pedals"].plot(x[:len(gas)], gas[:n], pen=pg.mkPen("#00e676", width=2.0))
+        self.plots["pedals"].plot(x[:len(brk)], brk[:n], pen=pg.mkPen("#ff1744", width=2.0))
 
         if self.ref_tel:
             ref_gas = [g * 100.0 for g in (self.ref_tel.get("gas") or [])]
@@ -2152,26 +2378,51 @@ class TelemetryStudioWindow(QMainWindow):
             ref_x = self.ref_tel.get("distance") or []
             if len(ref_x) >= 2:
                 self.plots["pedals"].plot(ref_x[:len(ref_gas)], ref_gas,
-                                          pen=pg.mkPen("#81c784", width=1, style=Qt.DotLine))
+                                          pen=pg.mkPen("#81c784", width=1.5, style=Qt.DashLine))
                 self.plots["pedals"].plot(ref_x[:len(ref_brk)], ref_brk,
-                                          pen=pg.mkPen("#e57373", width=1, style=Qt.DotLine))
+                                          pen=pg.mkPen("#ff8a80", width=1.5, style=Qt.DashLine))
 
-        # 3. Marcha
+        # 3. Marcha (Amarelo sólido vs Branco tracejado)
         gear = self.current_tel.get("gear") or []
-        self.plots["gear"].plot(x[:len(gear)], gear[:n], pen=pg.mkPen("#ffea00", width=1.5))
+        self.plots["gear"].plot(x[:len(gear)], gear[:n], pen=pg.mkPen("#ffea00", width=2.0))
 
-        # 4. Volante
+        if self.ref_tel:
+            ref_gear = self.ref_tel.get("gear") or []
+            ref_x = self.ref_tel.get("distance") or []
+            if len(ref_x) >= 2:
+                self.plots["gear"].plot(ref_x[:len(ref_gear)], ref_gear,
+                                        pen=pg.mkPen("#ffffff", width=1.5, style=Qt.DashLine))
+
+        # 4. Volante (Amarelo sólido vs Laranja tracejado)
         steer = self.current_tel.get("steer") or []
-        self.plots["steer"].plot(x[:len(steer)], steer[:n], pen=pg.mkPen("#ffd23f", width=1.5))
+        self.plots["steer"].plot(x[:len(steer)], steer[:n], pen=pg.mkPen("#ffd23f", width=2.0))
         self.plots["steer"].addLine(y=0, pen=pg.mkPen("#555555", style=Qt.DashLine))
 
-        # 5. Delta de Tempo
-        plot_delta = self.plots["delta"]
         if self.ref_tel:
+            ref_steer = self.ref_tel.get("steer") or []
+            ref_x = self.ref_tel.get("distance") or []
+            if len(ref_x) >= 2:
+                self.plots["steer"].plot(ref_x[:len(ref_steer)], ref_steer,
+                                         pen=pg.mkPen("#ff9100", width=1.5, style=Qt.DashLine))
+
+        # 5. Delta de Tempo (Δt: Verde = ganhando, Vermelho = perdendo; Eixo -400ms a +400ms com auto-scale)
+        plot_delta = self.plots["delta"]
+        plot_delta.addLine(y=0, pen=pg.mkPen("#ffffff", width=1.0, style=Qt.DashLine))
+
+        if self.ref_tel and "delta" in self.current_tel:
             deltas = self.current_tel.get("delta") or []
-            if len(deltas) >= 2:
-                plot_delta.plot(x[:len(deltas)], deltas[:n], pen=pg.mkPen(LAP_COLOR_MAIN, width=1.5))
-        plot_delta.addLine(y=0, pen=pg.mkPen("#666666", style=Qt.DashLine))
+            if len(deltas) >= 2 and len(x) >= 2:
+                pts_n = min(len(x), len(deltas))
+                x_pts = np.array(x[:pts_n], dtype=np.float64)
+                y_pts = np.array(deltas[:pts_n], dtype=np.float64)
+
+                self._plot_bicolor_delta(plot_delta, x_pts, y_pts)
+
+                max_abs = float(np.max(np.abs(y_pts))) if len(y_pts) > 0 else 0.4
+                y_limit = max(0.400, max_abs * 1.15)
+                plot_delta.setYRange(-y_limit, y_limit, padding=0.02)
+        else:
+            plot_delta.setYRange(-0.400, 0.400, padding=0.02)
 
         # Posiciona as linhas verticais de limites de setores S1 e S2
         if self.sector_analysis and len(self.sector_analysis.sectors) >= 2:
@@ -2183,57 +2434,384 @@ class TelemetryStudioWindow(QMainWindow):
 
     # -- Seleção de Voltas e Dados ------------------------------------------
 
+    def _on_tree_mode_changed(self):
+        self.reload_catalog()
+
+    def _on_tree_filter_changed(self, text: str):
+        self._filter_tree(text)
+
+    def _filter_tree(self, query: str):
+        q = (query or "").strip().lower()
+
+        def check_item(item: QTreeWidgetItem) -> bool:
+            item_match = False
+            for c in range(item.columnCount()):
+                if q in item.text(c).lower():
+                    item_match = True
+                    break
+            child_matched = False
+            for i in range(item.childCount()):
+                if check_item(item.child(i)):
+                    child_matched = True
+
+            visible = (item_match or child_matched) if q else True
+            item.setHidden(not visible)
+            if q and child_matched:
+                item.setExpanded(True)
+            return visible
+
+        self.tree.blockSignals(True)
+        for i in range(self.tree.topLevelItemCount()):
+            check_item(self.tree.topLevelItem(i))
+        self.tree.blockSignals(False)
+
+    def _select_tree_lap(self, lap_id: str):
+        def find_in_item(item: QTreeWidgetItem) -> Optional[QTreeWidgetItem]:
+            d = item.data(0, Qt.UserRole)
+            if d and len(d) >= 3 and d[2] == lap_id:
+                return item
+            for i in range(item.childCount()):
+                found = find_in_item(item.child(i))
+                if found:
+                    return found
+            return None
+
+        for i in range(self.tree.topLevelItemCount()):
+            found = find_in_item(self.tree.topLevelItem(i))
+            if found:
+                self.tree.blockSignals(True)
+                self.tree.setCurrentItem(found)
+                # Garante que ancestrais estejam expandidos
+                parent = found.parent()
+                while parent:
+                    parent.setExpanded(True)
+                    parent = parent.parent()
+                self.tree.blockSignals(False)
+                break
+
     def reload_catalog(self):
+        mode = self.combo_tree_mode.currentData() if hasattr(self, "combo_tree_mode") and self.combo_tree_mode.currentData() else "date"
         self.tree.blockSignals(True)
         self.tree.clear()
 
-        total_laps = 0
-        for combo in self.library.catalog():
-            track, car = combo["track"], combo["car"]
-            total_laps += combo["laps"]
-            best = combo["best"]
+        # Coleta todas as voltas registradas no disco + voltas de demo ativas
+        all_recs: List[LapRecord] = []
+        if hasattr(self, "_demo_records") and self._demo_records:
+            all_recs.extend(self._demo_records)
+        all_recs.extend(self.library.all_records())
 
-            top = QTreeWidgetItem([f"{track} — {car}",
-                                   best.lap_time_str if best else "",
-                                   f"{combo['laps']} voltas"])
-            top.setForeground(0, QColor(T.TXT_TITLE))
-            self.tree.addTopLevelItem(top)
+        # Desduplica por (track, car, lap_id)
+        seen_keys = set()
+        unique_recs: List[LapRecord] = []
+        for r in all_recs:
+            k = (r.track, r.car, r.lap_id)
+            if k not in seen_keys:
+                seen_keys.add(k)
+                unique_recs.append(r)
 
-            for session in self.library.sessions(track, car):
-                node = QTreeWidgetItem([
-                    f"Sessão {session['date_str'] or session['session_id']}",
-                    session["best"].lap_time_str if session["best"] else "",
-                    f"{len(session['laps'])} voltas"])
-                node.setForeground(0, QColor(T.TXT_UNIT))
-                top.addChild(node)
+        total_laps = len(unique_recs)
 
-                for rec in session["laps"]:
-                    leaf = QTreeWidgetItem([rec.label(with_date=False),
-                                            rec.lap_time_str, rec.date_str])
-                    leaf.setData(0, Qt.UserRole, (track, car, rec.lap_id))
-                    if not rec.valid:
-                        leaf.setForeground(0, QColor("#c98a00"))
-                    if best is not None and rec.lap_id == best.lap_id:
-                        leaf.setForeground(1, QColor("#00e676"))
-                    node.addChild(leaf)
+        if mode == "date":
+            self._populate_tree_by_date(unique_recs)
+        elif mode == "car":
+            self._populate_tree_by_car(unique_recs)
+        else:
+            self._populate_tree_by_track(unique_recs)
 
-        self.tree.expandToDepth(0)
+        # Expansão inteligente inicial
+        self.tree.expandToDepth(1 if mode == "date" else 0)
         self.tree.blockSignals(False)
+
+        # Re-aplica filtro de busca se houver texto
+        if hasattr(self, "txt_filter") and self.txt_filter.text().strip():
+            self._filter_tree(self.txt_filter.text().strip())
 
         if total_laps:
             self.lbl_status.setText(f"{total_laps} voltas disponíveis no catálogo.")
         else:
             self.lbl_status.setText("Catálogo vazio. Use o botão Demo para testar.")
 
+    def _populate_tree_by_date(self, recs: List[LapRecord]):
+        days: Dict[str, List[LapRecord]] = {}
+        for r in recs:
+            days.setdefault(r.day_key, []).append(r)
+
+        for day_k in sorted(days.keys(), reverse=True):
+            day_laps = days[day_k]
+            day_timed = [r for r in day_laps if r.lap_time_ms > 0 and r.full_lap and r.valid]
+            day_best = min(day_timed, key=lambda r: r.lap_time_ms) if day_timed else None
+
+            day_display = day_laps[0].day_display if day_laps else day_k
+            day_node = QTreeWidgetItem([
+                f"📅 {day_display}",
+                day_best.lap_time_str if day_best else "",
+                f"{len(day_laps)} voltas"
+            ])
+            day_node.setForeground(0, QColor(T.TXT_TITLE))
+            day_node.setFont(0, QFont(T.FONT_UI, 9, QFont.Bold))
+            if day_best:
+                day_node.setForeground(1, QColor("#00e676"))
+            self.tree.addTopLevelItem(day_node)
+
+            # Agrupa por Pista
+            tracks: Dict[str, List[LapRecord]] = {}
+            for r in day_laps:
+                tracks.setdefault(r.track, []).append(r)
+
+            for trk_name in sorted(tracks.keys()):
+                trk_laps = tracks[trk_name]
+                trk_timed = [r for r in trk_laps if r.lap_time_ms > 0 and r.full_lap and r.valid]
+                trk_best = min(trk_timed, key=lambda r: r.lap_time_ms) if trk_timed else None
+
+                trk_node = QTreeWidgetItem([
+                    f"🏁 {trk_name}",
+                    trk_best.lap_time_str if trk_best else "",
+                    f"{len(trk_laps)} voltas"
+                ])
+                trk_node.setForeground(0, QColor("#80d8ff"))
+                trk_node.setFont(0, QFont(T.FONT_UI, 8, QFont.Bold))
+                day_node.addChild(trk_node)
+
+                # Agrupa por Carro
+                cars: Dict[str, List[LapRecord]] = {}
+                for r in trk_laps:
+                    cars.setdefault(r.car, []).append(r)
+
+                for car_name in sorted(cars.keys()):
+                    car_laps = cars[car_name]
+                    car_timed = [r for r in car_laps if r.lap_time_ms > 0 and r.full_lap and r.valid]
+                    car_best = min(car_timed, key=lambda r: r.lap_time_ms) if car_timed else None
+
+                    car_node = QTreeWidgetItem([
+                        f"🏎️ {car_name}",
+                        car_best.lap_time_str if car_best else "",
+                        f"{len(car_laps)} voltas"
+                    ])
+                    car_node.setForeground(0, QColor("#ffd600"))
+                    car_node.setFont(0, QFont(T.FONT_UI, 8, QFont.Bold))
+                    trk_node.addChild(car_node)
+
+                    # Agrupa por Sessão
+                    sessions: Dict[str, List[LapRecord]] = {}
+                    for r in car_laps:
+                        sid = r.session_id or r.timestamp[:16] or "sessao"
+                        sessions.setdefault(sid, []).append(r)
+
+                    for sid, s_laps in sessions.items():
+                        s_timed = [r for r in s_laps if r.lap_time_ms > 0 and r.full_lap and r.valid]
+                        s_best = min(s_timed, key=lambda r: r.lap_time_ms) if s_timed else None
+                        s_name = s_laps[0].session_display_name
+
+                        sess_node = QTreeWidgetItem([
+                            f"⏱️ {s_name}",
+                            s_best.lap_time_str if s_best else "",
+                            f"{len(s_laps)} voltas"
+                        ])
+                        sess_node.setForeground(0, QColor(T.TXT_UNIT))
+                        car_node.addChild(sess_node)
+
+                        for r in s_laps:
+                            t_detail = r.date_str.split(" ")[-1] if r.date_str else ""
+                            lbl = r.label(with_date=False)
+                            is_best = (car_best and r.lap_id == car_best.lap_id)
+                            if is_best:
+                                lbl = f"★ {lbl}"
+                            leaf = QTreeWidgetItem([lbl, r.lap_time_str or "--:--.---", t_detail])
+                            leaf.setData(0, Qt.UserRole, (r.track, r.car, r.lap_id))
+                            if not r.valid:
+                                leaf.setForeground(0, QColor("#c98a00"))
+                            elif is_best:
+                                leaf.setForeground(0, QColor("#00e676"))
+                                leaf.setForeground(1, QColor("#00e676"))
+                            sess_node.addChild(leaf)
+
+    def _populate_tree_by_track(self, recs: List[LapRecord]):
+        tracks: Dict[str, List[LapRecord]] = {}
+        for r in recs:
+            tracks.setdefault(r.track, []).append(r)
+
+        for trk_name in sorted(tracks.keys()):
+            trk_laps = tracks[trk_name]
+            trk_timed = [r for r in trk_laps if r.lap_time_ms > 0 and r.full_lap and r.valid]
+            trk_best = min(trk_timed, key=lambda r: r.lap_time_ms) if trk_timed else None
+
+            trk_node = QTreeWidgetItem([
+                f"🏁 {trk_name}",
+                trk_best.lap_time_str if trk_best else "",
+                f"{len(trk_laps)} voltas"
+            ])
+            trk_node.setForeground(0, QColor(T.TXT_TITLE))
+            trk_node.setFont(0, QFont(T.FONT_UI, 9, QFont.Bold))
+            if trk_best:
+                trk_node.setForeground(1, QColor("#00e676"))
+            self.tree.addTopLevelItem(trk_node)
+
+            # Carros
+            cars: Dict[str, List[LapRecord]] = {}
+            for r in trk_laps:
+                cars.setdefault(r.car, []).append(r)
+
+            for car_name in sorted(cars.keys()):
+                car_laps = cars[car_name]
+                car_timed = [r for r in car_laps if r.lap_time_ms > 0 and r.full_lap and r.valid]
+                car_best = min(car_timed, key=lambda r: r.lap_time_ms) if car_timed else None
+
+                car_node = QTreeWidgetItem([
+                    f"🏎️ {car_name}",
+                    car_best.lap_time_str if car_best else "",
+                    f"{len(car_laps)} voltas"
+                ])
+                car_node.setForeground(0, QColor("#ffd600"))
+                car_node.setFont(0, QFont(T.FONT_UI, 8, QFont.Bold))
+                trk_node.addChild(car_node)
+
+                # Dias
+                days: Dict[str, List[LapRecord]] = {}
+                for r in car_laps:
+                    days.setdefault(r.day_key, []).append(r)
+
+                for day_k in sorted(days.keys(), reverse=True):
+                    day_laps = days[day_k]
+                    day_display = day_laps[0].day_display if day_laps else day_k
+                    day_node = QTreeWidgetItem([
+                        f"📅 {day_display}",
+                        "",
+                        f"{len(day_laps)} voltas"
+                    ])
+                    day_node.setForeground(0, QColor("#80d8ff"))
+                    car_node.addChild(day_node)
+
+                    # Sessões
+                    sessions: Dict[str, List[LapRecord]] = {}
+                    for r in day_laps:
+                        sid = r.session_id or r.timestamp[:16] or "sessao"
+                        sessions.setdefault(sid, []).append(r)
+
+                    for sid, s_laps in sessions.items():
+                        s_name = s_laps[0].session_display_name
+                        sess_node = QTreeWidgetItem([
+                            f"⏱️ {s_name}", "", f"{len(s_laps)} voltas"
+                        ])
+                        sess_node.setForeground(0, QColor(T.TXT_UNIT))
+                        day_node.addChild(sess_node)
+
+                        for r in s_laps:
+                            t_detail = r.date_str.split(" ")[-1] if r.date_str else ""
+                            lbl = r.label(with_date=False)
+                            is_best = (car_best and r.lap_id == car_best.lap_id)
+                            if is_best:
+                                lbl = f"★ {lbl}"
+                            leaf = QTreeWidgetItem([lbl, r.lap_time_str or "--:--.---", t_detail])
+                            leaf.setData(0, Qt.UserRole, (r.track, r.car, r.lap_id))
+                            if not r.valid:
+                                leaf.setForeground(0, QColor("#c98a00"))
+                            elif is_best:
+                                leaf.setForeground(0, QColor("#00e676"))
+                                leaf.setForeground(1, QColor("#00e676"))
+                            sess_node.addChild(leaf)
+
+    def _populate_tree_by_car(self, recs: List[LapRecord]):
+        cars: Dict[str, List[LapRecord]] = {}
+        for r in recs:
+            cars.setdefault(r.car, []).append(r)
+
+        for car_name in sorted(cars.keys()):
+            car_laps = cars[car_name]
+            car_timed = [r for r in car_laps if r.lap_time_ms > 0 and r.full_lap and r.valid]
+            car_best = min(car_timed, key=lambda r: r.lap_time_ms) if car_timed else None
+
+            car_node = QTreeWidgetItem([
+                f"🏎️ {car_name}",
+                car_best.lap_time_str if car_best else "",
+                f"{len(car_laps)} voltas"
+            ])
+            car_node.setForeground(0, QColor(T.TXT_TITLE))
+            car_node.setFont(0, QFont(T.FONT_UI, 9, QFont.Bold))
+            if car_best:
+                car_node.setForeground(1, QColor("#00e676"))
+            self.tree.addTopLevelItem(car_node)
+
+            # Pistas
+            tracks: Dict[str, List[LapRecord]] = {}
+            for r in car_laps:
+                tracks.setdefault(r.track, []).append(r)
+
+            for trk_name in sorted(tracks.keys()):
+                trk_laps = tracks[trk_name]
+                trk_timed = [r for r in trk_laps if r.lap_time_ms > 0 and r.full_lap and r.valid]
+                trk_best = min(trk_timed, key=lambda r: r.lap_time_ms) if trk_timed else None
+
+                trk_node = QTreeWidgetItem([
+                    f"🏁 {trk_name}",
+                    trk_best.lap_time_str if trk_best else "",
+                    f"{len(trk_laps)} voltas"
+                ])
+                trk_node.setForeground(0, QColor("#80d8ff"))
+                trk_node.setFont(0, QFont(T.FONT_UI, 8, QFont.Bold))
+                car_node.addChild(trk_node)
+
+                # Dias
+                days: Dict[str, List[LapRecord]] = {}
+                for r in trk_laps:
+                    days.setdefault(r.day_key, []).append(r)
+
+                for day_k in sorted(days.keys(), reverse=True):
+                    day_laps = days[day_k]
+                    day_display = day_laps[0].day_display if day_laps else day_k
+                    day_node = QTreeWidgetItem([
+                        f"📅 {day_display}", "", f"{len(day_laps)} voltas"
+                    ])
+                    day_node.setForeground(0, QColor("#ffd600"))
+                    trk_node.addChild(day_node)
+
+                    # Sessões
+                    sessions: Dict[str, List[LapRecord]] = {}
+                    for r in day_laps:
+                        sid = r.session_id or r.timestamp[:16] or "sessao"
+                        sessions.setdefault(sid, []).append(r)
+
+                    for sid, s_laps in sessions.items():
+                        s_name = s_laps[0].session_display_name
+                        sess_node = QTreeWidgetItem([
+                            f"⏱️ {s_name}", "", f"{len(s_laps)} voltas"
+                        ])
+                        sess_node.setForeground(0, QColor(T.TXT_UNIT))
+                        day_node.addChild(sess_node)
+
+                        for r in s_laps:
+                            t_detail = r.date_str.split(" ")[-1] if r.date_str else ""
+                            lbl = r.label(with_date=False)
+                            is_best = (trk_best and r.lap_id == trk_best.lap_id)
+                            if is_best:
+                                lbl = f"★ {lbl}"
+                            leaf = QTreeWidgetItem([lbl, r.lap_time_str or "--:--.---", t_detail])
+                            leaf.setData(0, Qt.UserRole, (r.track, r.car, r.lap_id))
+                            if not r.valid:
+                                leaf.setForeground(0, QColor("#c98a00"))
+                            elif is_best:
+                                leaf.setForeground(0, QColor("#00e676"))
+                                leaf.setForeground(1, QColor("#00e676"))
+                            sess_node.addChild(leaf)
+
     def _on_tree_selection_changed(self):
         items = self.tree.selectedItems()
         if not items:
             return
-        data = items[0].data(0, Qt.UserRole)
+        item = items[0]
+        data = item.data(0, Qt.UserRole)
         if not data:
+            # Alterna expansão de pasta clicada
+            item.setExpanded(not item.isExpanded())
             return
         track, car, lap_id = data
-        rec = self.library.find(track, car, lap_id)
+        rec = None
+        if hasattr(self, "_demo_records"):
+            for r in self._demo_records:
+                if r.lap_id == lap_id:
+                    rec = r
+                    break
+        if rec is None:
+            rec = self.library.find(track, car, lap_id)
         if rec is None:
             return
 
@@ -2251,7 +2829,10 @@ class TelemetryStudioWindow(QMainWindow):
         self.current_track = track
         self.current_car = car
         self.current_rec = rec
-        self.current_tel = self.library.load_telemetry(track, car, rec) or {}
+        if hasattr(self, "_mock_telemetries") and rec.lap_id in self._mock_telemetries:
+            self.current_tel = self._mock_telemetries[rec.lap_id]
+        else:
+            self.current_tel = self.library.load_telemetry(track, car, rec) or {}
 
         if not self.current_tel:
             self.lbl_status.setText("Falha ao abrir telemetria desta volta.")
@@ -2282,6 +2863,13 @@ class TelemetryStudioWindow(QMainWindow):
                                    speeds=self.current_tel.get("speed"), distances=distances)
         self.playback.set_total_points(self.track_map.total_points)
 
+        # Configura a nuvem G-G Pós-Treino
+        cur_lat = self.current_tel.get("g_lat") or []
+        cur_lon = self.current_tel.get("g_lon") or []
+        ref_lat = self.ref_tel.get("g_lat") or [] if self.ref_tel else []
+        ref_lon = self.ref_tel.get("g_lon") or [] if self.ref_tel else []
+        self.hud.set_lap_g_data(cur_lat, cur_lon, ref_lat, ref_lon)
+
         self.lbl_session_title.setText(
             f"{track}  ·  {car}  ·  Volta {rec.lap_number} ({rec.lap_time_str})")
         self.redraw_charts()
@@ -2291,6 +2879,13 @@ class TelemetryStudioWindow(QMainWindow):
         self.combo_ref.blockSignals(True)
         self.combo_ref.clear()
         self.combo_ref.addItem("Sem Referência (Análise Solo)", None)
+
+        # Se houver voltas demo em memória
+        if hasattr(self, "_demo_records") and self._demo_records:
+            for r in self._demo_records:
+                if self.current_rec and r.lap_id == self.current_rec.lap_id:
+                    continue
+                self.combo_ref.addItem(f"★ {r.label(with_date=False)} ({r.lap_time_str})", r)
 
         best = self.library.best_lap(self.current_track, self.current_car)
         if best and self.current_rec and best.lap_id != self.current_rec.lap_id:
@@ -2314,7 +2909,10 @@ class TelemetryStudioWindow(QMainWindow):
         ref_rec = self.combo_ref.currentData()
         if ref_rec is not None:
             self.ref_rec = ref_rec
-            self.ref_tel = self.library.load_telemetry(self.current_track, self.current_car, ref_rec) or {}
+            if hasattr(self, "_mock_telemetries") and ref_rec.lap_id in self._mock_telemetries:
+                self.ref_tel = self._mock_telemetries[ref_rec.lap_id]
+            else:
+                self.ref_tel = self.library.load_telemetry(self.current_track, self.current_car, ref_rec) or {}
             self._compute_deltas()
             if self.corner_map and self.ref_tel and self.corner_map.corners:
                 self.corner_comparisons = ca.compare_laps(
@@ -2338,6 +2936,13 @@ class TelemetryStudioWindow(QMainWindow):
         self.track_map.set_reference_lap_data(self.ref_tel)
         self.corner_table.populate(self.corner_metrics, self.corner_comparisons,
                                    speeds=self.current_tel.get("speed"), distances=self.current_tel.get("distance"))
+
+        ref_lat = self.ref_tel.get("g_lat") or [] if self.ref_tel else []
+        ref_lon = self.ref_tel.get("g_lon") or [] if self.ref_tel else []
+        cur_lat = self.current_tel.get("g_lat") or []
+        cur_lon = self.current_tel.get("g_lon") or []
+        self.hud.set_lap_g_data(cur_lat, cur_lon, ref_lat, ref_lon)
+
         self.redraw_charts()
         self._on_point_seek(self.playback.current_index)
 
@@ -2349,25 +2954,32 @@ class TelemetryStudioWindow(QMainWindow):
         ref_dists = self.ref_tel.get("distance") or []
         ref_times = self.ref_tel.get("times") or []
 
-        if len(cur_dists) < 2 or len(ref_dists) < 2:
+        n_cur = min(len(cur_dists), len(cur_times))
+        n_ref = min(len(ref_dists), len(ref_times))
+        if n_cur < 2 or n_ref < 2:
             return
 
+        tot_act = float(cur_dists[n_cur - 1]) if cur_dists[n_cur - 1] > 0 else 1.0
+        tot_ref = float(ref_dists[n_ref - 1]) if ref_dists[n_ref - 1] > 0 else 1.0
+
         deltas = []
-        for i, d in enumerate(cur_dists):
-            if d < ref_dists[0] or d > ref_dists[-1]:
-                deltas.append(0.0)
-                continue
-            j = bisect.bisect_left(ref_dists, d)
+        for i in range(n_cur):
+            d_act = cur_dists[i]
+            p = _clamp(d_act / tot_act, 0.0, 1.0)
+            d_ref_target = p * tot_ref
+
+            j = bisect.bisect_left(ref_dists, d_ref_target, 0, n_ref)
             if j <= 0:
-                ref_t = ref_times[0]
-            elif j >= len(ref_dists):
-                ref_t = ref_times[-1]
+                ref_t = float(ref_times[0])
+            elif j >= n_ref:
+                ref_t = float(ref_times[n_ref - 1])
             else:
                 d0, d1 = ref_dists[j - 1], ref_dists[j]
                 t0, t1 = ref_times[j - 1], ref_times[j]
-                ratio = (d - d0) / (d1 - d0) if d1 != d0 else 0.0
+                ratio = (d_ref_target - d0) / (d1 - d0) if d1 != d0 else 0.0
                 ref_t = t0 + ratio * (t1 - t0)
-            deltas.append(cur_times[i] - ref_t)
+
+            deltas.append(float(cur_times[i] - ref_t))
 
         self.current_tel["delta"] = deltas
 
@@ -2383,70 +2995,174 @@ class TelemetryStudioWindow(QMainWindow):
             _track_profile, _gear_for_speed
         )
 
-        tel = {
+        pts = len(_MOCK_TRACK_PATH)
+
+        # 1. Gera Telemetria da Volta Ativa (Volta 2 - 1:32.500)
+        act_tel = {
             "times": [], "distance": [], "speed": [], "gas": [], "brake": [],
             "steer": [], "gear": [], "rpm": [], "car_x": [], "car_z": [],
             "g_lat": [], "g_lon": [], "sector": []
         }
 
-        pts = len(_MOCK_TRACK_PATH)
+        # 2. Gera Telemetria da Volta de Referência (Volta 1 - 1:31.920)
+        # Mais veloz, traçado com raio ligeiramente otimizado em curvas e retomada antecipada
+        ref_tel = {
+            "times": [], "distance": [], "speed": [], "gas": [], "brake": [],
+            "steer": [], "gear": [], "rpm": [], "car_x": [], "car_z": [],
+            "g_lat": [], "g_lon": [], "sector": []
+        }
+
         for i in range(pts):
             p = i / float(max(1, pts - 1))
             sec_idx = 0 if p < 0.3333 else (1 if p < 0.6667 else 2)
-            gas, brk, spd, steer = _track_profile(p)
-            gear, rpm = _gear_for_speed(spd, braking=(brk > 0.1))
+
             x, z = _MOCK_TRACK_PATH[i]
             dist = p * TRACK_LENGTH
-            t = p * 92.5
 
-            lat_g = steer * 2.2
-            lon_g = (1.1 if gas > 0.5 else 0.0) - (brk * 1.8)
+            # Vetor normal à pista para deslocamento de traçado de comparação
+            prev_i = max(0, i - 1)
+            next_i = min(pts - 1, i + 1)
+            dx = _MOCK_TRACK_PATH[next_i][0] - _MOCK_TRACK_PATH[prev_i][0]
+            dz = _MOCK_TRACK_PATH[next_i][1] - _MOCK_TRACK_PATH[prev_i][1]
+            norm = math.hypot(dx, dz)
+            nx = -dz / norm if norm > 0 else 0.0
+            nz = dx / norm if norm > 0 else 0.0
 
-            tel["times"].append(t)
-            tel["distance"].append(dist)
-            tel["speed"].append(spd)
-            tel["gas"].append(gas)
-            tel["brake"].append(brk)
-            tel["steer"].append(steer * 45.0)
-            tel["gear"].append(gear)
-            tel["rpm"].append(int(rpm))
-            tel["car_x"].append(x)
-            tel["car_z"].append(z)
-            tel["g_lat"].append(lat_g)
-            tel["g_lon"].append(lon_g)
-            tel["sector"].append(sec_idx)
+            # Volta Ativa (Atual - 1:32.500)
+            gas_act, brk_act, spd_act, steer_act = _track_profile(p)
+            gear_act, rpm_act = _gear_for_speed(spd_act, braking=(brk_act > 0.1))
+            lat_g_act = steer_act * 2.2
+            lon_g_act = (1.1 if gas_act > 0.5 else 0.0) - (brk_act * 1.8)
 
-        demo_rec = LapRecord(
+            act_tel["times"].append(p * 92.5)
+            act_tel["distance"].append(dist)
+            act_tel["speed"].append(spd_act)
+            act_tel["gas"].append(gas_act)
+            act_tel["brake"].append(brk_act)
+            act_tel["steer"].append(steer_act * 45.0)
+            act_tel["gear"].append(gear_act)
+            act_tel["rpm"].append(int(rpm_act))
+            act_tel["car_x"].append(x)
+            act_tel["car_z"].append(z)
+            act_tel["g_lat"].append(lat_g_act)
+            act_tel["g_lon"].append(lon_g_act)
+            act_tel["sector"].append(sec_idx)
+
+            # Volta de Referência (Ideal - 1:31.920, Δ -0.580s)
+            line_offset = math.sin(p * math.pi * 8) * 1.6
+            ref_x = x + nx * line_offset
+            ref_z = z + nz * line_offset
+
+            spd_ref = spd_act
+            brk_ref = brk_act
+            gas_ref = gas_act
+            steer_ref = steer_act
+
+            # Ganho de velocidade e antecipação nas curvas
+            if 0.15 <= p < 0.22:
+                spd_ref = max(spd_act, spd_act + 4.0)
+            elif 0.22 <= p < 0.38:
+                gas_ref = min(1.0, gas_act + 0.12)
+                spd_ref = spd_act + 3.0
+            elif 0.50 <= p < 0.60:
+                spd_ref = spd_act + 3.5
+            elif 0.75 <= p < 0.88:
+                spd_ref = spd_act + 2.5
+                gas_ref = min(1.0, gas_act + 0.08)
+
+            gear_ref, rpm_ref = _gear_for_speed(spd_ref, braking=(brk_ref > 0.1))
+            lat_g_ref = steer_ref * 2.3
+            lon_g_ref = (1.15 if gas_ref > 0.5 else 0.0) - (brk_ref * 1.9)
+
+            ref_tel["times"].append(p * 91.92)
+            ref_tel["distance"].append(dist)
+            ref_tel["speed"].append(spd_ref)
+            ref_tel["gas"].append(gas_ref)
+            ref_tel["brake"].append(brk_ref)
+            ref_tel["steer"].append(steer_ref * 43.0)
+            ref_tel["gear"].append(gear_ref)
+            ref_tel["rpm"].append(int(rpm_ref))
+            ref_tel["car_x"].append(ref_x)
+            ref_tel["car_z"].append(ref_z)
+            ref_tel["g_lat"].append(lat_g_ref)
+            ref_tel["g_lon"].append(lon_g_ref)
+            ref_tel["sector"].append(sec_idx)
+
+        ref_rec = LapRecord(
             lap_id="demo_01", track=TRACK_NAME, car=CAR_NAME,
-            lap_number=1, lap_time_str="1:32.500", lap_time_ms=92500,
-            sector_times_ms=[30800, 32900, 28800],
+            session_id="mock_session_1000",
+            session_type="Qualify",
+            lap_number=1, lap_time_str="1:31.920", lap_time_ms=91920,
+            sector_times_ms=[30550, 32680, 28690],
+            timestamp="2026-09-15 10:00:00",
             valid=True, full_lap=True, points=pts
         )
 
+        act_rec = LapRecord(
+            lap_id="demo_02", track=TRACK_NAME, car=CAR_NAME,
+            session_id="mock_session_1000",
+            session_type="Qualify",
+            lap_number=2, lap_time_str="1:32.500", lap_time_ms=92500,
+            sector_times_ms=[30800, 32900, 28800],
+            timestamp="2026-09-15 10:01:35",
+            valid=True, full_lap=True, points=pts
+        )
+
+        self._demo_records = [ref_rec, act_rec]
+        self._mock_telemetries["demo_01"] = ref_tel
+        self._mock_telemetries["demo_02"] = act_tel
+
+        # Popula a árvore com a nova organização hierárquica
+        self.reload_catalog()
+        self._select_tree_lap(act_rec.lap_id)
+
         self.current_track = TRACK_NAME
         self.current_car = CAR_NAME
-        self.current_rec = demo_rec
-        self.current_tel = tel
+        self.current_rec = act_rec
+        self.current_tel = act_tel
+        self.ref_rec = ref_rec
+        self.ref_tel = ref_tel
 
-        self.corner_map = self._get_or_detect_corner_map(TRACK_NAME, tel)
+        self._compute_deltas()
+
+        self.corner_map = self._get_or_detect_corner_map(TRACK_NAME, act_tel)
         if self.corner_map and self.corner_map.corners:
-            self.corner_metrics = ca.analyze_lap(tel, self.corner_map.corners, self.corner_map.track_length)
+            self.corner_metrics = ca.analyze_lap(act_tel, self.corner_map.corners, self.corner_map.track_length)
+            self.corner_comparisons = ca.compare_laps(
+                act_tel, ref_tel, self.corner_map.corners, self.corner_map.track_length)
         else:
             self.corner_metrics = []
+            self.corner_comparisons = []
+
+        self._populate_ref_combos()
+
+        self.combo_ref.blockSignals(True)
+        idx_ref = self.combo_ref.findData(ref_rec)
+        if idx_ref >= 0:
+            self.combo_ref.setCurrentIndex(idx_ref)
+        elif self.combo_ref.count() > 1:
+            self.combo_ref.setCurrentIndex(1)
+        self.combo_ref.blockSignals(False)
 
         self.sector_analysis = sa.analyze_sectors_and_micro(
-            tel, None, num_micro_per_sector=8
+            act_tel, ref_tel, num_micro_per_sector=8,
+            best_sector_times_s=[30.550, 32.680, 28.690]
         )
         self.sectors_ribbon.update_analysis(self.sector_analysis)
         self.micro_table.populate(self.sector_analysis)
         self.track_map.set_sector_analysis(self.sector_analysis)
-        self.track_map.set_lap_data(tel, self.corner_map, self.corner_metrics)
-        self.corner_table.populate(self.corner_metrics, speeds=tel.get("speed"), distances=tel.get("distance"))
+        self.track_map.set_lap_data(act_tel, self.corner_map, self.corner_metrics)
+        self.track_map.set_reference_lap_data(ref_tel)
+        self.corner_table.populate(self.corner_metrics, self.corner_comparisons,
+                                   speeds=act_tel.get("speed"), distances=act_tel.get("distance"))
         self.playback.set_total_points(self.track_map.total_points)
 
+        self.hud.set_lap_g_data(act_tel.get("g_lat"), act_tel.get("g_lon"),
+                                ref_tel.get("g_lat"), ref_tel.get("g_lon"))
+
         self.lbl_session_title.setText(
-            f"⚡ DEMO — {TRACK_NAME} · {CAR_NAME} · Volta 1 (1:32.500)")
-        self.lbl_status.setText("Volta demo carregada com sucesso. Explore os setores, micro-setores e traçado.")
+            f"⚡ DEMO — {TRACK_NAME} · {CAR_NAME} · Volta 2 vs Volta 1 (Δ -0.580s)")
+        self.lbl_status.setText("Sessão demo carregada com sobreposição ativa (Volta 2 vs Volta 1 Referência).")
         self.redraw_charts()
         self._on_point_seek(0)
 

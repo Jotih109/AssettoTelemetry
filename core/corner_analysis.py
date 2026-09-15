@@ -214,9 +214,11 @@ class CornerMetrics:
     """Métricas de UMA curva em UMA volta. Campos None = não foi possível medir."""
     corner: Corner
     braking_point_m: Optional[float] = None
+    braking_speed: Optional[float] = None
     v_min: Optional[float] = None
     v_min_m: Optional[float] = None
     throttle_point_m: Optional[float] = None
+    throttle_pct: Optional[float] = None
     entry_time: Optional[float] = None
     exit_time: Optional[float] = None
 
@@ -1047,13 +1049,11 @@ def analyze_corner(telemetry: dict, corner: Corner, track_length: float = 0.0,
                    search_from_m: float = None,
                    search_to_m: float = None) -> CornerMetrics:
     """
-    Calcula as quatro métricas da curva sobre os arrays de uma volta.
-
-    `search_from_m` / `search_to_m` limitam as janelas de busca do ponto de
-    frenagem e do ponto de retomada — normalmente o fim da curva anterior e o
-    início da próxima. Sem esses limites, duas curvas em sequência acabariam
-    apontando a MESMA freada (a janela de uma invade o trecho da outra).
-    `analyze_lap` e `compare_laps` já passam isso pela lista de curvas.
+    Calcula as métricas da curva sobre os arrays de uma volta:
+      * Ponto de início de frenagem (m) e velocidade na frenagem (km/h)
+      * Velocidade mínima no ápice (km/h) e metro do ápice (m)
+      * Ponto de retomada de aceleração (m) e porcentagem de acelerador (%)
+      * Tempo do trecho da curva (s)
     """
     distances = telemetry.get("distance") or []
     times = telemetry.get("times") or []
@@ -1085,48 +1085,67 @@ def analyze_corner(telemetry: dict, corner: Corner, track_length: float = 0.0,
             metrics.v_min_m = float(distances[i])
             apex_idx = i
 
+    if apex_idx is None:
+        metrics.v_min = None
+        metrics.v_min_m = None
+
     # --- Ponto de frenagem: primeiro cruzamento 0% -> >10% antes do ápice ---
-    # A freada acontece na reta anterior, por isso a janela começa atrás da
-    # entrada da curva. Exigir que os pontos anteriores estejam com o pé fora
-    # do freio evita marcar o meio de uma freada longa como "o ponto".
     brake_from = max(0.0, start_m - BRAKE_LOOKBACK_M)
     if search_from_m is not None:
         brake_from = max(brake_from, float(search_from_m))
     brake_to = metrics.v_min_m if metrics.v_min_m is not None else end_m
+
     for i in _index_range(distances, brake_from, brake_to):
         if i >= len(brakes) or i == 0:
             continue
-        if brakes[i] > BRAKE_ON_THRESHOLD and brakes[i - 1] <= BRAKE_OFF_THRESHOLD:
-            metrics.braking_point_m = float(distances[i])
-            break
+        if brakes[i] > BRAKE_ON_THRESHOLD:
+            if brakes[i - 1] <= BRAKE_OFF_THRESHOLD or (brakes[i - 1] < BRAKE_ON_THRESHOLD and (i < 2 or brakes[i - 2] <= 0.05)):
+                metrics.braking_point_m = float(distances[i])
+                metrics.braking_speed = float(speeds[i]) if i < len(speeds) else None
+                break
 
     # --- Ponto de retomada: acelerador de volta a 100% saindo da curva ---
     throttle_from = metrics.v_min_m if metrics.v_min_m is not None else start_m
     throttle_to = end_m + THROTTLE_LOOKAHEAD_M
     if search_to_m is not None:
         throttle_to = min(throttle_to, float(search_to_m))
+
+    max_gas_seen = 0.0
     for i in _index_range(distances, throttle_from, throttle_to):
         if i >= len(gases):
             break
+        g = float(gases[i])
+        if g > max_gas_seen:
+            max_gas_seen = g
         if gases[i] >= THROTTLE_FULL_THRESHOLD:
             metrics.throttle_point_m = float(distances[i])
+            metrics.throttle_pct = 100.0
             break
 
-    if apex_idx is None:
-        metrics.v_min = None
-        metrics.v_min_m = None
+    if metrics.throttle_point_m is None and max_gas_seen > 0.0:
+        metrics.throttle_pct = float(max_gas_seen * 100.0)
 
     return metrics
 
 
 def search_bounds(corners: List[Corner], i: int, track_length: float):
     """
-    Até onde a busca da curva `i` pode ir para trás e para frente: o fim da
-    curva anterior e o início da próxima. É o que impede duas curvas seguidas
-    de reivindicarem a mesma freada ou a mesma retomada.
+    Até onde a busca da curva `i` pode ir para trás e para frente.
+    Usa o ponto médio da curva vizinha para permitir janela de busca
+    mesmo em curvas contíguas.
     """
-    from_m = corners[i - 1].end_m(track_length) if i > 0 else None
-    to_m = corners[i + 1].start_m(track_length) if i + 1 < len(corners) else None
+    if i > 0:
+        c_prev = corners[i - 1]
+        from_m = (c_prev.start_m(track_length) + c_prev.end_m(track_length)) / 2.0
+    else:
+        from_m = None
+
+    if i + 1 < len(corners):
+        c_next = corners[i + 1]
+        to_m = (c_next.start_m(track_length) + c_next.end_m(track_length)) / 2.0
+    else:
+        to_m = None
+
     return from_m, to_m
 
 

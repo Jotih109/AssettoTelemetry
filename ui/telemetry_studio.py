@@ -31,7 +31,9 @@ from PyQt5.QtGui import (
 import pyqtgraph as pg
 import numpy as np
 
-from core.lap_library import LapLibrary, LapRecord, RetentionPolicy
+from core.lap_library import (LapLibrary, LapRecord, RetentionPolicy,
+                              APEX_OPEN_FILTER, APEX_SAVE_FILTER,
+                              suggest_apex_filename)
 from core import corner_analysis as ca
 from core import sector_analysis as sa
 from ui import theme as T
@@ -3469,9 +3471,7 @@ class TelemetryStudioWindow(QMainWindow):
 
     def _on_import_lap(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Importar Pacote de Volta", "",
-            "Pacote de Volta Apex (*.apex *.lap.json.gz *.json.gz *.json);;Todos os Arquivos (*.*)"
-        )
+            self, "Importar Pacote de Volta", "", APEX_OPEN_FILTER)
         if not path:
             return
         rec = self.library.import_lap_file(path)
@@ -3488,11 +3488,9 @@ class TelemetryStudioWindow(QMainWindow):
             return
         track = self.current_track or self.current_rec.track
         car = self.current_car or self.current_rec.car
-        sugestao = f"{track}_{car}_L{self.current_rec.lap_number}_{self.current_rec.lap_time_str.replace(':', '-').replace('.', '-')}.apex"
         path, _ = QFileDialog.getSaveFileName(
-            self, "Exportar Pacote de Volta (.apex)", sugestao,
-            "Pacote de Volta Apex (*.apex);;Todos os Arquivos (*.*)"
-        )
+            self, "Exportar Pacote de Volta (.apex)",
+            suggest_apex_filename(track, car, self.current_rec), APEX_SAVE_FILTER)
         if not path:
             return
         if self.library.export_lap_file(track, car, self.current_rec, path):

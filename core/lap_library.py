@@ -287,6 +287,34 @@ def clean_name(name: str, fallback: str) -> str:
     return name if name else fallback
 
 
+# ---------------------------------------------------------------------------
+# Pacote de volta (.apex) — o que as telas precisam saber
+# ---------------------------------------------------------------------------
+# Duas janelas oferecem importar e exportar volta (a análise pós-sessão e o
+# estúdio). O que elas fazem depois difere — o estúdio abre a volta importada
+# na hora, a outra só recarrega a lista —, mas a LISTA DE EXTENSÕES ACEITAS
+# tem que ser a mesma nas duas. Deixar a string do filtro copiada em cada
+# arquivo é como elas divergem: alguém aceita um formato novo de um lado e o
+# outro lado passa a recusar o arquivo que o próprio app acabou de gravar.
+
+#: Extensões que `import_lap_file` sabe ler (ver `read_json_file`).
+APEX_OPEN_FILTER = ("Pacote de Volta Apex (*.apex *.lap.json.gz *.json.gz *.json);;"
+                    "Todos os Arquivos (*.*)")
+APEX_SAVE_FILTER = "Pacote de Volta Apex (*.apex);;Todos os Arquivos (*.*)"
+
+
+def suggest_apex_filename(track: str, car: str, rec: "LapRecord") -> str:
+    """
+    Nome sugerido no diálogo de exportação, já livre do que o sistema de
+    arquivos recusa — pista e carro vêm do jogo e podem trazer `:` ou `/`.
+    """
+    pista = clean_name(str(track or ""), "Pista").replace(" ", "-")
+    carro = clean_name(str(car or ""), "Carro").replace(" ", "-")
+    tempo = _SAFE_ID.sub("-", str(getattr(rec, "lap_time_str", "") or "sem-tempo"))
+    volta = getattr(rec, "lap_number", 0) or 0
+    return f"{pista}_{carro}_L{volta}_{tempo}.apex"
+
+
 def write_bytes_atomic(path: str, payload: bytes) -> bool:
     """Grava e só então substitui o definitivo — arquivo truncado nunca."""
     tmp_path = f"{path}.tmp"
@@ -1019,22 +1047,22 @@ class LapLibrary:
             print(f"[LapLibrary] Arquivo de volta inválido ou ilegível: {file_path}")
             return None
 
-        if "metadata" in data and "telemetry" in data:
-            meta = data.get("metadata", {}) or {}
-            telemetry = data.get("telemetry", {}) or {}
-        elif "telemetry" in data:
-            meta = data.get("metadata", {}) or {}
-            telemetry = data.get("telemetry", {}) or {}
-        else:
+        # O bloco de metadados é opcional (um arquivo só com telemetria ainda
+        # dá uma volta importável, sem pista nem tempo conhecidos); o de
+        # telemetria, não — sem ele não há volta nenhuma.
+        if "telemetry" not in data:
             print(f"[LapLibrary] Arquivo não possui bloco de telemetria: {file_path}")
+            return None
+        meta = data.get("metadata") or {}
+        telemetry = data.get("telemetry") or {}
+        if not isinstance(meta, dict) or not isinstance(telemetry, dict):
+            print(f"[LapLibrary] Blocos do pacote em formato inesperado: {file_path}")
             return None
 
         times = telemetry.get("times")
         if not times or not isinstance(times, list) or len(times) < 5:
             print(f"[LapLibrary] Telemetria sem amostras de tempo suficientes: {file_path}")
             return None
-
-        from core.session_manager import parse_lap_time_ms
 
         raw_track = str(meta.get("track") or "UnknownTrack")
         raw_car = str(meta.get("car") or "UnknownCar")
@@ -1069,7 +1097,9 @@ class LapLibrary:
             "full_lap": bool(meta.get("full_lap", True)),
             "valid": bool(meta.get("valid", True)),
             "pit_lap": bool(meta.get("pit_lap", False)),
-            "manual_save": True,
+            # Nasce fixada para não sumir na primeira limpeza — mas só com o
+            # alfinete, que o piloto pode tirar. `manual_save` aqui seria uma
+            # segunda tranca invisível, e desafixar não faria mais efeito.
             "pinned": True,
             "imported": True,
         })
@@ -1088,27 +1118,13 @@ class LapLibrary:
             print(f"[LapLibrary] Falha ao salvar telemetria importada em {dest_file}")
             return None
 
-        rec = LapRecord(
-            lap_id=lap_id,
-            file=rel_file.replace("\\", "/"),
-            track=track,
-            car=car,
-            session_id=imported_meta["session_id"],
-            session_type=imported_meta["session_type"],
-            lap_number=lap_num,
-            lap_time_str=lap_time_str,
-            lap_time_ms=parse_lap_time_ms(lap_time_str),
-            sector_times_ms=sector_times_ms,
-            timestamp=imported_meta["timestamp"],
-            points=len(times),
-            channels=sorted(k for k, v in telemetry.items() if isinstance(v, list) and v),
-            full_lap=imported_meta["full_lap"],
-            valid=imported_meta["valid"],
-            pit_lap=imported_meta["pit_lap"],
-            manual_save=True,
-            pinned=True,
-            imported=True,
-        )
+        # O registro sai do MESMO dicionário que foi para o disco. Montar os
+        # dois à mão, lado a lado, é como eles saem de sincronia: alguém mexe
+        # numa flag em cima e esquece da cópia de baixo, e aí o índice passa a
+        # discordar do arquivo.
+        rec = self._record_from_payload(
+            lap_payload, file=rel_file.replace("\\", "/"),
+            track=track, car=car, lap_id=lap_id)
 
         recs = self.records(track, car)
         recs.insert(0, rec)
@@ -1169,8 +1185,11 @@ class LapLibrary:
             return 0
 
         keep_ids = set()
-        # Fixadas, salvas à mão e importadas: intocáveis
-        keep_ids.update(r.lap_id for r in recs if r.pinned or r.manual_save or getattr(r, "imported", False))
+        # Fixadas e salvas à mão: intocáveis. Volta importada nasce fixada (ver
+        # `import_lap_file`), então já entra aqui — e manter uma cláusula
+        # separada para `imported` faria o alfinete não desgrudar nunca: o
+        # piloto desafixaria pela tela e a volta continuaria protegida.
+        keep_ids.update(r.lap_id for r in recs if r.pinned or r.manual_save)
         # As mais recentes (a lista já vem da mais nova para a mais velha)
         keep_ids.update(r.lap_id for r in recs[:pol.keep_recent])
         # As mais rápidas válidas e inteiras

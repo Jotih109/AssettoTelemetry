@@ -107,6 +107,57 @@ class TestModule1GhostSharing(unittest.TestCase):
         finally:
             shutil.rmtree(fresh_dir, ignore_errors=True)
 
+    def test_desafixar_importada_devolve_ela_a_retencao(self):
+        """
+        Volta importada nasce fixada, mas o alfinete tem que desgrudar: quem
+        clica em desafixar está dizendo que aquela volta pode ser limpa. Se a
+        retenção protegesse `imported` por conta própria, o botão da tela
+        viraria enfeite.
+        """
+        track, car = "Interlagos", "Porsche 911 GT3"
+        telem = make_dummy_telemetry(80)
+        # Propositalmente LENTA: assim nem `keep_best` nem `keep_recent` a
+        # seguram, e o único motivo de ela sobreviver seria o alfinete.
+        origem = self.library.save_lap(
+            track, car, telemetry=telem, lap_time_str="1:59.900",
+            sector_times_ms=[39000, 40000, 40900], lap_number=1, full_lap=True)
+        pacote = os.path.join(self.temp_dir, "volta.apex")
+        self.assertTrue(self.library.export_lap_file(track, car, origem, pacote))
+
+        destino = tempfile.mkdtemp()
+        try:
+            lib = LapLibrary(data_dir=destino,
+                             retention=RetentionPolicy(enabled=True, keep_best=1, keep_recent=1))
+            imp = lib.import_lap_file(pacote)
+            self.assertTrue(imp.pinned, "volta importada deve nascer fixada")
+
+            # Fixada, ela resiste mesmo sendo a mais lenta do catálogo.
+            for i in range(6):
+                lib.save_lap(imp.track, imp.car, telemetry=telem,
+                             lap_time_str=f"1:40.00{i}",
+                             sector_times_ms=[30000, 35000, 35000],
+                             lap_number=i + 2, full_lap=True)
+            self.assertTrue(
+                any(r.lap_id == imp.lap_id for r in lib.records(imp.track, imp.car)),
+                "fixada, a volta importada não podia ter sido limpa")
+
+            lib.set_pinned(imp.track, imp.car, imp.lap_id, False)
+            agora = next(r for r in lib.records(imp.track, imp.car) if r.lap_id == imp.lap_id)
+            self.assertFalse(agora.pinned)
+            self.assertTrue(agora.imported, "a marca de importada continua, para a etiqueta da lista")
+
+            # Sem o alfinete, a próxima limpeza tem que levá-la.
+            for i in range(6):
+                lib.save_lap(imp.track, imp.car, telemetry=telem,
+                             lap_time_str=f"1:41.00{i}",
+                             sector_times_ms=[30000, 35000, 36000],
+                             lap_number=i + 8, full_lap=True)
+
+            sobreviveu = any(r.lap_id == imp.lap_id for r in lib.records(imp.track, imp.car))
+            self.assertFalse(sobreviveu, "desafixada, a volta importada tinha que entrar na limpeza")
+        finally:
+            shutil.rmtree(destino, ignore_errors=True)
+
 
 class TestModule2TrailBraking(unittest.TestCase):
     def test_smooth_trail_braking(self):

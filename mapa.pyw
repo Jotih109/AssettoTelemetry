@@ -31,7 +31,9 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QFont
 import pyqtgraph as pg
 
-from core.lap_library import LapLibrary, LapRecord, RetentionPolicy
+from core.lap_library import (LapLibrary, LapRecord, RetentionPolicy,
+                              APEX_OPEN_FILTER, APEX_SAVE_FILTER,
+                              suggest_apex_filename)
 from ui import theme as T
 
 #: Cores das voltas sobrepostas, na ordem de seleção. A primeira é a base:
@@ -612,9 +614,7 @@ class LapAnalysisWindow(QMainWindow):
 
     def on_import_lap(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Importar Pacote de Volta", "",
-            "Pacote de Volta Apex (*.apex *.lap.json.gz *.json.gz *.json);;Todos os Arquivos (*.*)"
-        )
+            self, "Importar Pacote de Volta", "", APEX_OPEN_FILTER)
         if not path:
             return
         rec = self.library.import_lap_file(path)
@@ -630,11 +630,9 @@ class LapAnalysisWindow(QMainWindow):
             self.lbl_status.setText("Selecione uma volta à esquerda para exportar o pacote .apex.")
             return
         track, car, rec = marcadas[0]
-        sugestao = f"{track}_{car}_L{rec.lap_number}_{rec.lap_time_str.replace(':', '-').replace('.', '-')}.apex"
         path, _ = QFileDialog.getSaveFileName(
-            self, "Exportar Pacote de Volta (.apex)", sugestao,
-            "Pacote de Volta Apex (*.apex);;Todos os Arquivos (*.*)"
-        )
+            self, "Exportar Pacote de Volta (.apex)",
+            suggest_apex_filename(track, car, rec), APEX_SAVE_FILTER)
         if not path:
             return
         if self.library.export_lap_file(track, car, rec, path):

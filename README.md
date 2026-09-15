@@ -58,7 +58,7 @@ Quer comparar voltas em mapa e gráficos? `python mapa.pyw`.
 | [Onde ficam os dados](#-onde-ficam-os-dados) | o que cada arquivo em disco é |
 | [Preferências](#-preferências-persistentes-configjson) | todas as chaves do `config.json` |
 | [Como executar](#-como-executar) | modos, argumentos e variáveis |
-| [Testes](#-testes-automatizados) | 570+ verificações |
+| [Testes](#-testes-automatizados) | 600+ verificações, um comando só |
 | [Solução de problemas](#-solução-de-problemas) | quando algo não aparece |
 | [O que ainda falta](#-o-que-ainda-falta--planejado) | roadmap honesto |
 
@@ -699,6 +699,7 @@ AssettoCorsa-Telemetry/
 ├── ApexView_POS.pyw        # > Estação de telemetria ponto a ponto (estilo MoTeC)
 ├── mapa.pyw                # > Tela de análise pós-sessão (offline)
 ├── ajustar_voz.pyw         # > Ajuste da voz: ritmo, tom e timbre, escolhidos de ouvido
+├── run_tests.py            # > Roda a suíte inteira e devolve código de saída
 ├── requirements.txt        # Dependências Python
 │
 ├── config.json             # Preferências (criado sozinho, fora do versionamento)
@@ -785,7 +786,22 @@ roadmap no fim deste arquivo.
 
 ## 🧪 Testes Automatizados
 
-Cada arquivo é um script que roda sozinho e imprime o placar (não precisa de pytest). **570+ verificações**, todas passando:
+A suíte inteira, com um comando só:
+
+```bash
+python run_tests.py              # tudo; sai com código 1 se algo falhar
+python run_tests.py -k corner    # só os arquivos cujo nome casa
+python run_tests.py -v           # mostra a saída completa de cada teste
+python run_tests.py --list       # lista o que seria rodado, sem rodar
+```
+
+O runner executa cada arquivo num processo separado (assim uma janela Qt travada
+não contamina os seguintes), força o Qt em modo `offscreen` — roda em máquina sem
+monitor — e **soma os placares num código de saída**, que é o que um CI lê.
+
+Cada arquivo também roda sozinho e imprime o próprio placar (não precisa de
+pytest), o que é o caminho para depurar um teste específico. **600+ verificações**,
+todas passando:
 
 ```bash
 python tests/test_race_weekend.py         # ⭐ o fim de semana inteiro, ponta a ponta
@@ -807,10 +823,9 @@ python tests/test_race_engineer.py
 python tests/test_voice_queue.py
 ```
 
-Ou todos de uma vez, no PowerShell:
-```powershell
-Get-ChildItem tests/test_*.py | ForEach-Object { python $_.FullName }
-```
+> ⚠️ `tests/test_voice.pyw` **não** é um teste automatizado, apesar do nome: é a
+> bancada de voz, que abre uma janela e fica esperando você clicar. Por isso o
+> runner só recolhe `.py` — um laço que rodasse os `.pyw` travaria para sempre.
 
 Os testes de interface precisam de `PyQt5` e `pyqtgraph`; os demais rodam só com a biblioteca padrão. **Nenhum deles toca nos seus dados:** todos gravam num diretório temporário e o `telemetry_data/` de verdade fica intocado.
 

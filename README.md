@@ -1,5 +1,7 @@
 # 🏎️ ApexView — Dashboard de Telemetria para Assetto Corsa (MoTeC i2 Style)
 
+[![Testes](https://github.com/Jotih109/AssettoTelemetry/actions/workflows/tests.yml/badge.svg)](https://github.com/Jotih109/AssettoTelemetry/actions/workflows/tests.yml)
+
 > ⚠️ **PROJETO EM DESENVOLVIMENTO ATIVO** — Dashboard profissional de telemetria em tempo real para Assetto Corsa 1, inspirado nos layouts de engenharia de dados do **MoTeC i2 Pro**. Acompanha a **Estação de Telemetria Ponto a Ponto** ([ApexView_POS.pyw](ApexView_POS.pyw)) e a tela de comparação de voltas ([mapa.pyw](mapa.pyw)).
 
 ---
@@ -878,18 +880,19 @@ O piloto sintético é parametrizável ([tests/weekend_sim.py](tests/weekend_sim
 - [x] ~~**Coaching em tempo real durante a volta**~~ — feito ([core/live_coach.py](core/live_coach.py)).
 - [x] ~~**Separação por sessão dentro do fim de semana**~~ — feito, com detecção automática.
 - [x] ~~**Aprendizado do coach que persiste entre sessões**~~ — feito ([core/corner_bests.py](core/corner_bests.py)).
+- [x] ~~**Volta ideal por trecho.**~~ Soma a melhor passagem de cada curva e desconta do Personal Best — card no topo da tela e o engenheiro fala o teto ("Somando suas melhores passagens de curva, seu teto atual nesta pista é...") ([core/corner_bests.py](core/corner_bests.py), [`announce_theoretical_ceiling`](core/race_engineer.py)).
+- [x] ~~**Importar uma volta de referência de fora.**~~ Pacote `.apex` portátil — exporta a telemetria comprimida com os metadados, importa e cai fixada no catálogo local; passa a valer como qualquer outra volta no seletor de referência ([`export_lap_file` / `import_lap_file`](core/lap_library.py)).
+- [x] ~~**Estratégia de pit stop.**~~ Regressão sobre desgaste de pneu e consumo projeta o cliff, a autonomia de combustível e a janela de box recomendada — aba própria na tela pós-sessão ([core/stint_analysis.py](core/stint_analysis.py)).
+- [x] ~~**Degradação de pneu ao longo do stint.**~~ Mesmo módulo: regressão linear do tempo de volta aponta quantos segundos por volta o ritmo está caindo, com o R² do ajuste — só quando a telemetria realmente tem o canal, nunca estimado ([core/stint_analysis.py](core/stint_analysis.py)).
+
 **No coach — as ideias que ficaram na mesa:**
 
-- [ ] **Insistir e reconhecer.** Se você erra a mesma curva três voltas seguidas, o coach repete a frase igual. Poderia mudar o tom e ficar mais específico; e, quando você corrige, reconhecer uma vez e parar de cobrar aquela curva.
-- [ ] **Volta ideal por trecho.** Ele já sabe a melhor passagem de cada curva; falta somar e dizer *"juntando seus melhores trechos: 1:22.1"*.
-- [ ] **Importar uma volta de referência de fora.** Hoje o coach só consegue te comparar com você mesmo — esse é o teto dele. Uma volta rápida importada (de um amigo, de um ghost baixado) destravaria o ganho absoluto. O seletor de referência já aceita qualquer volta do catálogo; falta só um jeito de pôr uma volta de fora lá dentro.
+- [ ] **Insistir e reconhecer.** Se você erra a mesma curva três voltas seguidas, o coach repete a frase igual. O contador de sequência já existe (`CornerProfile.streak`, em [core/live_coach.py](core/live_coach.py)) — falta ler esse número: mudar o tom e ficar mais específico a cada repetição, e reconhecer uma vez quando você corrige, sem seguir cobrando aquela curva.
 
 **No resto do app:**
 
 - [ ] **Sobreposição de múltiplas voltas no dashboard ao vivo** — hoje o ao vivo compara com uma referência de cada vez. Na tela pós-sessão já dá para sobrepor quatro.
-- [ ] **Atalhos de teclado** — tudo é feito no mouse.
-- [ ] **Estratégia de pit stop** — o engenheiro avisa que o combustível não fecha a corrida, mas não sugere em que volta parar.
-- [ ] **Degradação de pneu ao longo do stint** — o canal de desgaste é lido e mostrado, mas ninguém acompanha a tendência para dizer "seu ritmo cai a partir da volta 12".
+- [ ] **Atalhos de teclado** — tudo é feito no mouse; o único atalho hoje é Espaço para play/pause no Estúdio Pro.
 - [ ] **Suporte a múltiplos monitores** — desacoplar o painel lateral e a pilha de gráficos em janelas independentes.
 - [ ] **Steer lock dinâmico por carro** — ler o raio máximo de esterço dos arquivos de física do veículo, em vez de assumir um valor.
 

@@ -1,0 +1,38 @@
+name: Testes
+
+# Roda a cada push/PR e também sob demanda (aba Actions -> Run workflow),
+# para reexecutar sem precisar de um commit vazio.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  testes:
+    # windows-latest, não ubuntu: o app é Windows-only de verdade (a
+    # telemetria vem de memória compartilhada via ctypes) e o PyQt5 roda
+    # nativo aqui, sem precisar instalar libEGL/libxkbcommon/libxcb via apt
+    # só para o Qt abrir em modo offscreen — que é mais frágil de manter.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # A mesma versão usada no desenvolvimento. O README promete
+          # Python 3.8+, mas isso não é verificado aqui — testar contra
+          # múltiplas versões é um passo à parte, não coberto ainda.
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Instala dependências
+        run: pip install -r requirements.txt
+
+      - name: Checagem de sintaxe (falha rápido, antes da suíte)
+        run: python -m compileall -q core ui providers tests *.pyw run_tests.py
+
+      - name: Suíte de testes
+        run: python run_tests.py

@@ -268,13 +268,13 @@ class SessionManager:
                 "sector_times_ms": [0, 0, 0], "timestamp": ""
             },
             "telemetry": {
-                "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "gear": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "abs_intervention": [], "tc_intervention": [], "g_lat": []
+                "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "gear": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "abs_intervention": [], "tc_intervention": [], "g_lat": [], "clutch": []
             }
         }
         
     def reset_current_lap(self):
         self.current_lap_data = {
-            "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "gear": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "abs_intervention": [], "tc_intervention": [], "g_lat": []
+            "times": [], "distance": [], "speed": [], "gas": [], "brake": [], "sector": [], "rpm": [], "gear": [], "steer": [], "delta": [], "car_x": [], "car_z": [], "abs_intervention": [], "tc_intervention": [], "g_lat": [], "clutch": []
         }
         self.current_sector_times = [0, 0, 0]
 
@@ -476,6 +476,7 @@ class SessionManager:
         # Canal usado pela Análise Curva a Curva para detectar curvas quando a
         # pista ainda não tem mapeamento manual (|G lat| > 0.4g).
         self.current_lap_data["g_lat"].append(state.g_lat)
+        self.current_lap_data["clutch"].append(getattr(state, "clutch", 0.0))
 
     def _detect_new_session(self, state: TelemetryState) -> bool:
         """

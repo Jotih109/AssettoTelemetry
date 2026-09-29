@@ -964,22 +964,58 @@ class RaceEngineer:
         corners = corners or []
         zonas = da.brake_zones(lap)
 
-        # --- Pé preso: freio e acelerador juntos ---
-        overlap = da.brake_throttle_overlap(lap)
-        if overlap is not None and overlap >= OVERLAP_FRACTION:
-            pior = self._zona_para_falar(zonas, "overlap_fraction", corners, track_length)
-            onde = self._onde(corners, track_length,
-                              pior.corner_anchor_m if pior else None,
-                              fase=ca.PHASE_BRAKING)
-            out.append(Advice(
-                key="lap:overlap", severity=ATTENTION,
-                text=f"Freio e acelerador juntos{onde}. Solta um antes do outro",
-                detail=(f"os dois pedais em {overlap * 100:.0f}% da frenagem"
-                        + (f"; pior freada: {pior.overlap_fraction * 100:.0f}% "
-                           f"aos {pior.peak_m:.0f} m" if pior else "")),
-                corner=self._corner_index(corners, track_length,
-                                          pior.corner_anchor_m if pior else None),
-                kind="lap", time_at_stake=0.25))
+        # --- Pé preso x Punta-taco ---
+        pt_report = da.punta_taco_analysis(lap)
+        if pt_report.heel_and_toe_detected:
+            # O piloto está reduzindo com punta-taco: não acusa erro de overlap nas reduções!
+            unwanted = da.unwanted_brake_throttle_overlap(lap)
+            if unwanted is not None and unwanted >= OVERLAP_FRACTION:
+                pior = self._zona_para_falar(zonas, "unwanted_overlap_fraction", corners, track_length)
+                onde = self._onde(corners, track_length,
+                                  pior.corner_anchor_m if pior else None,
+                                  fase=ca.PHASE_BRAKING)
+                out.append(Advice(
+                    key="lap:overlap", severity=ATTENTION,
+                    text=f"Pé arrastando no acelerador fora das reduções{onde}. Libera o pedal na frenagem",
+                    detail=(f"sobreposição fora das reduções em {unwanted * 100:.0f}% da frenagem"
+                            + (f"; pior freada: {pior.unwanted_overlap_fraction * 100:.0f}% "
+                               f"aos {pior.peak_m:.0f} m" if pior else "")),
+                    corner=self._corner_index(corners, track_length,
+                                              pior.corner_anchor_m if pior else None),
+                    kind="lap", time_at_stake=0.25))
+            elif pt_report.unstable_blips > 0 and pt_report.worst_brake_drop >= 0.18:
+                # O piloto fez punta-taco mas a pressão no pedal do freio oscilou
+                onde = self._onde(corners, track_length, pt_report.worst_drop_m,
+                                  fase=ca.PHASE_BRAKING)
+                out.append(Advice(
+                    key="lap:punta_taco", severity=ATTENTION,
+                    text=f"No punta-taco{onde}, segura a pressão no freio. O pé aliviou no golpe de acelerador",
+                    detail=(f"oscilação de {pt_report.worst_brake_drop * 100:.0f}% no freio durante a redução"
+                            + (f" aos {pt_report.worst_drop_m:.0f} m" if pt_report.worst_drop_m else "")),
+                    corner=self._corner_index(corners, track_length, pt_report.worst_drop_m),
+                    kind="lap", time_at_stake=0.15))
+            elif pt_report.clean_blips >= 2 and pt_report.unstable_blips == 0:
+                out.append(Advice(
+                    key="lap:punta_taco", severity=INFO,
+                    text="Punta-taco muito bem executado nas reduções. Pressão no freio firme e blip preciso",
+                    detail=f"{pt_report.matched_blips} reduções com punta-taco limpo",
+                    kind="lap"))
+        else:
+            overlap = da.brake_throttle_overlap(lap)
+            if overlap is not None and overlap >= OVERLAP_FRACTION:
+                pior = self._zona_para_falar(zonas, "overlap_fraction", corners, track_length)
+                onde = self._onde(corners, track_length,
+                                  pior.corner_anchor_m if pior else None,
+                                  fase=ca.PHASE_BRAKING)
+                out.append(Advice(
+                    key="lap:overlap", severity=ATTENTION,
+                    text=f"Freio e acelerador juntos{onde}. Solta um antes do outro",
+                    detail=(f"os dois pedais em {overlap * 100:.0f}% da frenagem"
+                            + (f"; pior freada: {pior.overlap_fraction * 100:.0f}% "
+                               f"aos {pior.peak_m:.0f} m" if pior else "")),
+                    corner=self._corner_index(corners, track_length,
+                                              pior.corner_anchor_m if pior else None),
+                    kind="lap", time_at_stake=0.25))
 
         freio = da.brake_release_report(lap)
         if freio is None:
@@ -993,7 +1029,7 @@ class RaceEngineer:
                               fase=ca.PHASE_BRAKING)
             out.append(Advice(
                 key="lap:brake_jitter", severity=ATTENTION,
-                text=f"Tá repisando o freio{onde}. Alivia contínuo até o ápice",
+                text=f"Tá repisando o freio{onde}. Alivia contínuo até o ápice com trail braking",
                 detail=("o carro balança na transição; "
                         f"repisada em {freio.jitter_zones} das {freio.zones} "
                         f"freadas da volta"
@@ -1014,7 +1050,7 @@ class RaceEngineer:
             out.append(Advice(
                 key="lap:brake_abrupt", severity=ATTENTION,
                 text=(f"Tá largando o freio de uma vez{onde}. "
-                      f"Alivia até o ápice"),
+                      f"Alivia até o ápice pra manter a frente colada"),
                 detail=("tira carga da dianteira quando a curva precisa dela, "
                         "e o carro para de girar na entrada; "
                         f"soltura seca em {freio.abrupt_zones} das {freio.zones} "

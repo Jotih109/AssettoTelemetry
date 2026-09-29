@@ -788,15 +788,32 @@ def _cue_text(nome: str, perfil: CornerProfile) -> str:
 
     Sem número o piloto não sabe quanto mexer; com número demais ele para de
     ouvir. Metros na freada (dá para enxergar na pista) e "mais velocidade" no
-    ápice (onde metro nenhum ajudaria).
+    ápice (onde metro nenhum ajudaria). Quando o piloto insiste no mesmo erro
+    por várias voltas, a fala fica mais específica para ajudá-lo a corrigir.
     """
     metros = int(round(perfil.cause_value))
     if perfil.cause == CAUSE_BRAKE_EARLY:
+        if perfil.streak >= 3:
+            return f"{nome} insistindo: atrasa a freada uns {metros} metros, estica a reta e faz trail braking"
+        if perfil.streak == 2:
+            return f"{nome} de novo: atrasa a freada uns {metros} metros, confia no freio"
         return f"{nome} chegando: atrasa a freada uns {metros} metros"
     if perfil.cause == CAUSE_BRAKE_LATE:
+        if perfil.streak >= 3:
+            return f"{nome} insistindo: antecipa a freada uns {metros} metros, prioriza a linha interna"
+        if perfil.streak == 2:
+            return f"{nome} de novo: antecipa a freada uns {metros} metros pra não espalhar"
         return f"{nome} chegando: antecipa a freada uns {metros} metros"
     if perfil.cause == CAUSE_VMIN:
+        if perfil.streak >= 3:
+            return f"{nome} insistindo: mais velocidade no ápice, solta o freio e deixa rolar no miolo"
+        if perfil.streak == 2:
+            return f"{nome} de novo: mais velocidade no ápice, solta o freio mais cedo"
         return f"{nome} chegando: mais velocidade no ápice"
     if perfil.cause == CAUSE_THROTTLE:
+        if perfil.streak >= 3:
+            return f"{nome} insistindo: abre o gás mais cedo na saída pra embalar a reta"
+        if perfil.streak == 2:
+            return f"{nome} de novo: abre o gás mais cedo, desenrola o volante no ápice"
         return f"{nome} chegando: abre o gás mais cedo na saída"
     return f"{nome} chegando: foco aqui, {_decimos(perfil.avg_loss_s)} em jogo"

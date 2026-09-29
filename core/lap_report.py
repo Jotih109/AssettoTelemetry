@@ -436,24 +436,55 @@ class LapReportGenerator:
         # -------------------------------------------------------------------
         techniques: List[ReportItem] = []
 
-        # 1. Pedais: Sobreposição
-        overlap = da.brake_throttle_overlap(lap_ch)
-        if overlap is not None:
-            if overlap >= 0.10:
+        # 1. Pedais: Sobreposição e Punta-Taco
+        pt_report = da.punta_taco_analysis(lap_ch)
+        unwanted_overlap = da.unwanted_brake_throttle_overlap(lap_ch)
+
+        if pt_report and pt_report.heel_and_toe_detected:
+            if pt_report.unstable_blips > 0 and pt_report.worst_brake_drop >= 0.18:
                 techniques.append(ReportItem(
                     category="technique",
-                    title="⚠️ Sobreposição Involuntária de Freio e Acelerador",
-                    description=f"Você manteve acelerador e freio acionados ao mesmo tempo em {overlap * 100:.0f}% das frenagens.",
-                    why="Pisar no acelerador enquanto ainda freia cria atrito parasita, superaquece os discos de freio e impede a dianteira de mergulhar adequadamente.",
-                    action="Certifique-se de soltar 100% o pé do acelerador antes de acionar o pedal de freio."
+                    title="⚠️ Modulação de Freio no Punta-Taco (Heel-and-Toe)",
+                    description=(f"Punta-taco detectado em {pt_report.matched_blips} reduções, "
+                                 f"mas com oscilação de até {pt_report.worst_brake_drop * 100:.0f}% na pressão do freio durante o golpe de acelerador."),
+                    why="Ao girar a lateral ou calcanhar do pé direito para acelerar, a ponta do pé perdeu pressão no pedal do freio. Isso faz a suspensão dianteira levantar e mergulhar abruptamente, gerando instabilidade na traseira.",
+                    action="Mantenha o tornozelo firme e a pressão no freio constante e contínua enquanto aplica o golpe rápido de acelerador para equalizar as rotações."
                 ))
-            elif overlap <= 0.02:
+            else:
                 techniques.append(ReportItem(
                     category="technique",
-                    title="✅ Transição Limpa de Pedais",
-                    description="Separação impecável entre freio e acelerador durante as frenagens.",
-                    why="Pedais bem dissociados evitam atrito parasita e permitem transferência de peso limpa."
+                    title="✅ Punta-Taco / Rev-Matching Exemplar",
+                    description=f"{pt_report.matched_blips} reduções de marcha executadas com punta-taco preciso e pressão constante de freio.",
+                    why="O golpe de acelerador durante a desaceleração eleva o giro e equaliza as rotações de motor e câmbio, eliminando o travamento do eixo de tração por freio-motor e garantindo desaceleração limpa e estável.",
+                    action="Técnica de redução exemplar. Mantenha essa precisão para preservar o equilíbrio da plataforma do carro até o ápice."
                 ))
+
+            if unwanted_overlap is not None and unwanted_overlap >= 0.10:
+                techniques.append(ReportItem(
+                    category="technique",
+                    title="⚠️ Sobreposição Involuntária Fora das Reduções",
+                    description=f"Além das reduções, o acelerador permaneceu acionado em {unwanted_overlap * 100:.0f}% dos trechos de frenagem sem troca de marcha.",
+                    why="Apoiar o pé no acelerador enquanto freia cria atrito parasita, superaquece os freios e atrapalha a transferência de peso.",
+                    action="Certifique-se de desacelerar completamente nos trechos de frenagem pura antes da tomada de curva."
+                ))
+        else:
+            overlap = da.brake_throttle_overlap(lap_ch)
+            if overlap is not None:
+                if overlap >= 0.10:
+                    techniques.append(ReportItem(
+                        category="technique",
+                        title="⚠️ Sobreposição Involuntária de Freio e Acelerador",
+                        description=f"Você manteve acelerador e freio acionados ao mesmo tempo em {overlap * 100:.0f}% das frenagens.",
+                        why="Pisar no acelerador enquanto ainda freia cria atrito parasita, superaquece os discos de freio e impede a dianteira de mergulhar adequadamente.",
+                        action="Certifique-se de soltar 100% o pé do acelerador antes de acionar o pedal de freio."
+                    ))
+                elif overlap <= 0.02:
+                    techniques.append(ReportItem(
+                        category="technique",
+                        title="✅ Transição Limpa de Pedais",
+                        description="Separação impecável entre freio e acelerador durante as frenagens.",
+                        why="Pedais bem dissociados evitam atrito parasita e permitem transferência de peso limpa."
+                    ))
 
         # 2. Pedais: Modulação e Soltura de Freio
         b_rep = da.brake_release_report(lap_ch)

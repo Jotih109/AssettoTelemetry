@@ -471,6 +471,59 @@ def test_freio_limpo_fica_calado():
     return "pedais separados: silêncio"
 
 
+def test_punta_taco_nao_vira_erro_de_overlap():
+    eng = RaceEngineer()
+    n = 200
+    times = [i * 0.016 for i in range(n)]
+    distance = [i * 10.0 for i in range(n)]
+    speed = [200.0 - i * 0.8 for i in range(n)]
+    brake = [0.0] * n
+    gas = [0.0] * n
+    gear = [5] * 70 + [4] * 70 + [3] * 60
+    rpm = [6000] * n
+    for i in range(50, 160):
+        brake[i] = 0.8
+    for i in range(65, 75):
+        gas[i] = 0.7
+        rpm[i] = 6800
+    for i in range(135, 145):
+        gas[i] = 0.65
+        rpm[i] = 6700
+    ch = lap_channels(n, times=times, distance=distance, speed=speed,
+                      brake=brake, gas=gas, gear=gear, rpm=rpm)
+    adv = eng.analyze_lap([], lap_telemetry=ch)
+    assert not por_chave(adv, "lap:overlap"), f"acusou overlap indevidamente: {textos(adv)}"
+    pt = por_chave(adv, "lap:punta_taco")
+    assert pt, f"não reconheceu punta-taco: {textos(adv)}"
+    assert "Punta-taco" in pt[0].text, pt[0].text
+    return pt[0].text
+
+
+def test_punta_taco_com_oscilacao_no_freio():
+    eng = RaceEngineer()
+    n = 200
+    times = [i * 0.016 for i in range(n)]
+    distance = [i * 10.0 for i in range(n)]
+    speed = [180.0 - i * 0.7 for i in range(n)]
+    brake = [0.0] * n
+    gas = [0.0] * n
+    gear = [4] * 80 + [3] * 120
+    rpm = [5000] * n
+    for i in range(40, 140):
+        brake[i] = 0.8
+    for i in range(75, 85):
+        gas[i] = 0.75
+        brake[i] = 0.50
+        rpm[i] = 6200
+    ch = lap_channels(n, times=times, distance=distance, speed=speed,
+                      brake=brake, gas=gas, gear=gear, rpm=rpm)
+    adv = eng.analyze_lap([], lap_telemetry=ch)
+    pt = por_chave(adv, "lap:punta_taco")
+    assert pt, f"não gerou conselho de punta-taco: {textos(adv)}"
+    assert "segura a pressão no freio" in pt[0].text, pt[0].text
+    return pt[0].text
+
+
 def test_freio_solto_em_degraus():
     eng = RaceEngineer()
     n = 400
@@ -1391,6 +1444,8 @@ for nome, fn in [
     ("setores: sem tempos, silêncio", test_sem_setores_fica_calado),
     ("pedais: freio e acelerador juntos", test_freio_e_acelerador_juntos),
     ("pedais: freio limpo fica calado", test_freio_limpo_fica_calado),
+    ("pedais: punta-taco não vira overlap", test_punta_taco_nao_vira_erro_de_overlap),
+    ("pedais: punta-taco com oscilação no freio", test_punta_taco_com_oscilacao_no_freio),
     ("pedais: freio solto em degraus", test_freio_solto_em_degraus),
     ("pedais: freio largado de uma vez", test_freio_largado_de_uma_vez),
     ("pedais: soltura progressiva fica calada", test_freio_solto_progressivo_fica_calado),

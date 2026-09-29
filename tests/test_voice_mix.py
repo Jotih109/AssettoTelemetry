@@ -45,7 +45,7 @@ CHAVES_REAIS = [
     "coach_cue:5", "coach_exit:5", "coach_ok:5", "coach_summary",
     "corner:3", "corner_ok:2",
     "lap:abs", "lap:tc", "abs", "tc",
-    "lap:overlap", "lap:brake_jitter", "lap:brake_abrupt", "lap:understeer",
+    "lap:overlap", "lap:punta_taco", "lap:brake_jitter", "lap:brake_abrupt", "lap:understeer",
     "lap:steer_rough", "lap:steer_smooth", "lap:shift_early", "lap:limiter",
     "limiter",
     "lap:melhor", "lap:pior", "lap:sector:1", "lap:sector_forte:2",

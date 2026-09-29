@@ -252,6 +252,57 @@ class TestLapReportGenerator(unittest.TestCase):
         self.assertTrue(has_overlap or has_abrupt,
                         f"Deveria acusar falha de técnica de pedais: {titles}")
 
+    def test_punta_taco_report_recognized(self):
+        """Verifica se o relatório de volta reconhece punta-taco em vez de chamar de erro de overlap."""
+        total_dist = 4000.0
+        n = 400
+        dists = [i * (total_dist / (n - 1)) for i in range(n)]
+        times = [i * 0.02 for i in range(n)]
+        speeds = [200.0] * 80 + [max(80.0, 200.0 - (i - 80) * 2.5) for i in range(80, 130)] + [90.0] * 150 + [max(40.0, 90.0 - (i - 280) * 1.5) for i in range(280, 330)] + [50.0] * 70
+        gases = [0.0] * n
+        brakes = [0.0] * n
+        steers = [0.0] * n
+        g_lats = [0.0] * n
+        gears = [5] * 100 + [4] * 100 + [3] * 100 + [2] * 100
+        rpms = [5000.0] * n
+
+        # Duas frenagens com reduções e blips de punta-taco
+        for i in range(80, 130):
+            brakes[i] = 0.85
+        for i in range(95, 105):
+            gases[i] = 0.7
+            rpms[i] = 6500.0
+
+        for i in range(280, 330):
+            brakes[i] = 0.85
+        for i in range(295, 305):
+            gases[i] = 0.65
+            rpms[i] = 6400.0
+
+        tel = {
+            "times": times, "distance": dists, "speed": speeds,
+            "gas": gases, "brake": brakes, "steer": steers,
+            "g_lat": g_lats, "gear": gears, "rpm": rpms,
+            "car_x": [0.0] * n, "car_z": [0.0] * n,
+            "abs_intervention": [0.0] * n, "tc_intervention": [0.0] * n
+        }
+
+        gen = LapReportGenerator()
+        corners = [
+            ca.Corner(name="C1", index=1, start=0.20, end=0.30),
+            ca.Corner(name="C2", index=2, start=0.70, end=0.80)
+        ]
+        res = gen.analyze(
+            lap_telemetry=tel,
+            ref_telemetry=tel,
+            track_name="Interlagos",
+            corners=corners
+        )
+
+        titles = [t.title for t in res.techniques]
+        self.assertFalse(any("Sobreposição Involuntária" in t for t in titles), f"acusou sobreposição involuntária: {titles}")
+        self.assertTrue(any("Punta-Taco" in t for t in titles), f"não reconheceu punta-taco: {titles}")
+
     def test_lap_library_export_report(self):
         """Valida métodos generate_lap_report e export_report na LapLibrary."""
         lib = LapLibrary(data_dir=os.path.join(self.tmp_dir, "lib_dados"),

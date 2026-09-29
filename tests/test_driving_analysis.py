@@ -592,6 +592,66 @@ def test_subesterco_aponta_a_curva():
     return f"pior: {curva.name} ({frac * 100:.0f}%)"
 
 
+def test_punta_taco_detectado():
+    n = 200
+    times = [i * 0.016 for i in range(n)]
+    distance = [i * 10.0 for i in range(n)]
+    speed = [200.0 - i * 0.8 for i in range(n)]
+    brake = [0.0] * n
+    gas = [0.0] * n
+    gear = [5] * 70 + [4] * 70 + [3] * 60  # reduções: 5->4 e 4->3
+    rpm = [6000] * n
+
+    for i in range(50, 160):
+        brake[i] = 0.8
+
+    for i in range(65, 75):
+        gas[i] = 0.7
+        rpm[i] = 6800
+
+    for i in range(135, 145):
+        gas[i] = 0.65
+        rpm[i] = 6700
+
+    ch = canais(n, times=times, distance=distance, speed=speed,
+                brake=brake, gas=gas, gear=gear, rpm=rpm)
+    rep = da.punta_taco_analysis(ch)
+    assert rep.heel_and_toe_detected, "punta-taco não detectado"
+    assert rep.matched_blips == 2, f"blips: {rep.matched_blips}"
+    assert rep.clean_blips == 2, f"blips limpos: {rep.clean_blips}"
+
+    unwanted = da.unwanted_brake_throttle_overlap(ch)
+    assert unwanted == 0.0, f"unwanted: {unwanted}"
+    return "2 reduções com punta-taco limpo e 0% sobreposição indesejada"
+
+
+def test_punta_taco_oscilacao_freio():
+    n = 200
+    times = [i * 0.016 for i in range(n)]
+    distance = [i * 10.0 for i in range(n)]
+    speed = [180.0 - i * 0.7 for i in range(n)]
+    brake = [0.0] * n
+    gas = [0.0] * n
+    gear = [4] * 80 + [3] * 120  # redução 4->3
+    rpm = [5000] * n
+
+    for i in range(40, 140):
+        brake[i] = 0.8
+
+    for i in range(75, 85):
+        gas[i] = 0.75
+        brake[i] = 0.50
+        rpm[i] = 6200
+
+    ch = canais(n, times=times, distance=distance, speed=speed,
+                brake=brake, gas=gas, gear=gear, rpm=rpm)
+    rep = da.punta_taco_analysis(ch)
+    assert rep.matched_blips == 1, rep.matched_blips
+    assert rep.unstable_blips == 1, rep.unstable_blips
+    assert abs(rep.worst_brake_drop - 0.30) < 0.05, rep.worst_brake_drop
+    return f"detectou oscilação de freio ({rep.worst_brake_drop * 100:.0f}%) no punta-taco"
+
+
 for nome, fn in [
     ("janela por metragem", test_janela_por_metragem),
     ("janela de uma curva", test_janela_de_curva),
@@ -600,6 +660,8 @@ for nome, fn in [
     ("pedais: sobreposição freio/acelerador", test_sobreposicao_de_pedais),
     ("pedais: sem sobreposição", test_sem_sobreposicao),
     ("pedais: sem freada é None", test_sobreposicao_sem_freada_e_none),
+    ("pedais: punta-taco detectado", test_punta_taco_detectado),
+    ("pedais: punta-taco com oscilação no freio", test_punta_taco_oscilacao_freio),
     ("pedais: degraus ao soltar o freio", test_degraus_ao_soltar_o_freio),
     ("pedais: uma marcação por freada", test_uma_marcacao_por_freada),
     ("pedais: alívio contínuo não é degrau", test_freio_solto_limpo),

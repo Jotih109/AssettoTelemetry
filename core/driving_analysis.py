@@ -110,6 +110,7 @@ class LapChannels:
         # como fração da volta inteira, e o recado saía sem lugar.
         self.abs_intervention = _floats(t.get("abs_intervention"))
         self.tc_intervention = _floats(t.get("tc_intervention"))
+        self.clutch = _floats(t.get("clutch"))
 
     def __len__(self) -> int:
         return len(self.distance) or len(self.times)
@@ -163,8 +164,227 @@ class LapChannels:
 
 
 # ---------------------------------------------------------------------------
-# Pedais
+# Pedais e Punta-Taco
 # ---------------------------------------------------------------------------
+
+@dataclasses.dataclass
+class BlipEvent:
+    """Um golpe de acelerador (blip) durante a frenagem para redução de marcha."""
+    start_idx: int
+    end_idx: int
+    peak_idx: int
+    peak_gas: float
+    duration_s: float
+    start_m: float
+    end_m: float
+    gear_before: Optional[int] = None
+    gear_after: Optional[int] = None
+    rpm_spike: float = 0.0
+    brake_drop: float = 0.0     # quanto a pressão do freio variou durante o golpe
+    is_downshift: bool = False
+    clean: bool = True          # True se o freio permaneceu estável
+
+
+@dataclasses.dataclass
+class PuntaTacoReport:
+    """Relatório da técnica de punta-taco / rev-matching na volta."""
+    total_downshifts: int = 0
+    matched_blips: int = 0
+    clean_blips: int = 0
+    unstable_blips: int = 0
+    worst_brake_drop: float = 0.0
+    worst_drop_m: Optional[float] = None
+    heel_and_toe_detected: bool = False
+    blips: List[BlipEvent] = dataclasses.field(default_factory=list)
+
+
+def detect_punta_tacos(ch: LapChannels) -> List[BlipEvent]:
+    """
+    Detecta golpes de acelerador (blips) durante frenagens associados a reduções de marcha (punta-taco / rev-matching).
+
+    Critérios para identificar um punta-taco legítimo:
+      1. O freio está acionado (brake > PEDAL_ON).
+      2. O acelerador dá um pulso transitório (duração entre 0.04s e 0.58s).
+      3. Há evidência de redução de marcha:
+         - Redução no canal de marcha (gear diminui), OU
+         - Acionamento da embreagem (clutch > 0.15) durante o pulso, OU
+         - Salto de RPM (rpm sobe >= 200 rpm) enquanto o carro desacelera ou mantém velocidade.
+    """
+    if not ch.has("gas", "brake"):
+        return []
+
+    tem_tempo = bool(ch.times)
+    n = len(ch)
+
+    def metro(i):
+        return ch.distance[i] if i < len(ch.distance) else 0.0
+
+    def instante(i):
+        return ch.times[i] if tem_tempo and i < len(ch.times) else (i / 60.0)
+
+    # Identifica blocos contíguos onde gas > PEDAL_ON
+    gas_pulses = []
+    in_pulse = False
+    p_start = 0
+    for i in range(n):
+        g = ch.gas[i] if i < len(ch.gas) else 0.0
+        if g > PEDAL_ON:
+            if not in_pulse:
+                in_pulse = True
+                p_start = i
+        else:
+            if in_pulse:
+                in_pulse = False
+                gas_pulses.append((p_start, i - 1))
+    if in_pulse:
+        gas_pulses.append((p_start, n - 1))
+
+    blips: List[BlipEvent] = []
+
+    for start_i, end_i in gas_pulses:
+        # Precisa coincidir com frenagem (freio pisado durante o pulso)
+        freio_no_pulso = any(ch.brake[j] > PEDAL_ON for j in range(start_i, end_i + 1) if j < len(ch.brake))
+        if not freio_no_pulso:
+            continue
+
+        t_start = instante(start_i)
+        t_end = instante(end_i)
+        dur_s = max(0.01, t_end - t_start)
+        # Um golpe de punta-taco é rápido: entre ~0.04s e 0.58s.
+        # Acima de 0.60s é pé preso/arrastando no acelerador, não blip de redução.
+        if dur_s < 0.04 or dur_s > 0.58:
+            continue
+
+        # Verifica marcha antes e depois (janela de ~0.5s ao redor)
+        w_before = max(0, start_i - 30)
+        w_after = min(n, end_i + 30)
+
+        gears_b = [LapChannels.gear_number(ch.gear[j]) for j in range(w_before, start_i)
+                   if j < len(ch.gear) and LapChannels.gear_number(ch.gear[j]) is not None]
+        gears_a = [LapChannels.gear_number(ch.gear[j]) for j in range(end_i, w_after)
+                   if j < len(ch.gear) and LapChannels.gear_number(ch.gear[j]) is not None]
+
+        g_before = gears_b[-1] if gears_b else None
+        g_after = gears_a[0] if gears_a else None
+        has_downshift = (g_before is not None and g_after is not None and g_after < g_before)
+
+        # Verifica embreagem (se o canal existir)
+        has_clutch = False
+        if hasattr(ch, "clutch") and ch.clutch:
+            c_win = ch.clutch[max(0, start_i - 15):min(len(ch.clutch), end_i + 15)]
+            if c_win and max(c_win) > 0.15:
+                has_clutch = True
+
+        # Verifica pulso de RPM enquanto desacelera
+        rpm_spike = 0.0
+        if ch.rpm and len(ch.rpm) > end_i:
+            r_win = ch.rpm[start_i:end_i + 1]
+            if r_win:
+                rpm_spike = max(r_win) - min(r_win)
+
+        v_start = ch.speed[start_i] if start_i < len(ch.speed) else 0.0
+        v_end = ch.speed[end_i] if end_i < len(ch.speed) else 0.0
+        decelerando = (v_end <= v_start + 8.0)
+        is_rpm_blip = (rpm_spike >= 200.0 and decelerando)
+
+        if not (has_downshift or has_clutch or is_rpm_blip):
+            continue
+
+        # Calcula a oscilação do freio durante o blip:
+        b_ref = ch.brake[start_i] if start_i < len(ch.brake) else 0.0
+        if start_i > 0 and start_i - 1 < len(ch.brake):
+            b_ref = max(b_ref, ch.brake[start_i - 1])
+        b_min = min(ch.brake[j] for j in range(start_i, end_i + 1) if j < len(ch.brake))
+        b_drop = max(0.0, b_ref - b_min)
+
+        peak_g = max(ch.gas[j] for j in range(start_i, end_i + 1) if j < len(ch.gas))
+        peak_idx = start_i + [ch.gas[j] for j in range(start_i, end_i + 1) if j < len(ch.gas)].index(peak_g)
+
+        blips.append(BlipEvent(
+            start_idx=start_i,
+            end_idx=end_i,
+            peak_idx=peak_idx,
+            peak_gas=peak_g,
+            duration_s=dur_s,
+            start_m=metro(start_i),
+            end_m=metro(end_i),
+            gear_before=g_before,
+            gear_after=g_after,
+            rpm_spike=rpm_spike,
+            brake_drop=b_drop,
+            is_downshift=has_downshift,
+            clean=(b_drop < 0.18)
+        ))
+
+    return blips
+
+
+def punta_taco_analysis(ch: LapChannels) -> PuntaTacoReport:
+    """
+    Balanço completo da técnica de punta-taco / rev-matching na volta.
+    """
+    if not ch.has("brake"):
+        return PuntaTacoReport()
+
+    blips = detect_punta_tacos(ch)
+
+    total_downshifts = 0
+    if len(ch.gear) >= 2:
+        last_g = LapChannels.gear_number(ch.gear[0])
+        for i in range(1, len(ch.gear)):
+            g = LapChannels.gear_number(ch.gear[i])
+            if g is not None and last_g is not None and g < last_g:
+                spd = ch.speed[i] if i < len(ch.speed) else 0.0
+                if spd >= 30.0:
+                    total_downshifts += 1
+            if g is not None:
+                last_g = g
+
+    clean_count = sum(1 for b in blips if b.clean)
+    unstable_count = sum(1 for b in blips if not b.clean)
+
+    worst_drop = 0.0
+    worst_drop_m = None
+    for b in blips:
+        if b.brake_drop > worst_drop:
+            worst_drop = b.brake_drop
+            worst_drop_m = b.start_m
+
+    heel_and_toe = len(blips) >= 2 or (len(blips) >= 1 and (total_downshifts <= 2 or len(blips) / max(1, total_downshifts) >= 0.4))
+
+    return PuntaTacoReport(
+        total_downshifts=total_downshifts,
+        matched_blips=len(blips),
+        clean_blips=clean_count,
+        unstable_blips=unstable_count,
+        worst_brake_drop=worst_drop,
+        worst_drop_m=worst_drop_m,
+        heel_and_toe_detected=heel_and_toe,
+        blips=blips
+    )
+
+
+def unwanted_brake_throttle_overlap(ch: LapChannels) -> Optional[float]:
+    """
+    Fração das amostras de frenagem com acelerador acionado FORA de punta-taco.
+
+    Se o piloto fez punta-taco para reduzir marcha, esses golpes não são
+    sobreposição involuntária ("pé preso") — são técnica de pilotagem.
+    """
+    if not ch.has("gas", "brake"):
+        return None
+    freando = [i for i, b in enumerate(ch.brake) if b > PEDAL_ON]
+    if len(freando) < MIN_SAMPLES:
+        return None
+    blips = detect_punta_tacos(ch)
+    if not blips:
+        return brake_throttle_overlap(ch)
+    blip_indices = {i for b in blips for i in range(b.start_idx, b.end_idx + 1)}
+
+    unwanted = sum(1 for i in freando
+                   if i < len(ch.gas) and ch.gas[i] > PEDAL_ON and i not in blip_indices)
+    return unwanted / len(freando)
+
 
 def brake_throttle_overlap(ch: LapChannels) -> Optional[float]:
     """
@@ -228,7 +448,8 @@ class BrakeZone:
 
     __slots__ = ("start_m", "end_m", "peak_brake", "peak_m", "jitter",
                  "jitter_depth", "abrupt", "release_s", "abs_peak", "samples",
-                 "overlap_samples", "_min_after_release")
+                 "overlap_samples", "_min_after_release", "blip_samples",
+                 "unwanted_overlap_samples", "punta_taco_count", "worst_brake_drop")
 
     def __init__(self, start_m: float = 0.0):
         self.start_m = start_m          # onde o pé encostou no freio
@@ -247,11 +468,20 @@ class BrakeZone:
         self.samples = 0                # amostras com o freio pisado
         self.overlap_samples = 0        # e quantas delas com o gás também
         self._min_after_release = None  # menor pressão desde que começou a soltar
+        self.blip_samples = 0           # amostras de acelerador em punta-taco
+        self.unwanted_overlap_samples = 0  # amostras de acelerador fora de punta-taco
+        self.punta_taco_count = 0       # reduções com punta-taco nesta freada
+        self.worst_brake_drop = 0.0     # maior oscilação de freio durante punta-taco
 
     @property
     def overlap_fraction(self) -> float:
         """Fração desta freada em que o acelerador também estava pisado."""
         return self.overlap_samples / self.samples if self.samples else 0.0
+
+    @property
+    def unwanted_overlap_fraction(self) -> float:
+        """Fração desta freada em que o acelerador estava pisado FORA do punta-taco."""
+        return self.unwanted_overlap_samples / self.samples if self.samples else 0.0
 
     @property
     def corner_anchor_m(self) -> float:
@@ -281,6 +511,9 @@ def brake_zones(ch: LapChannels) -> List[BrakeZone]:
     """
     if not ch.brake or not ch.distance:
         return []
+
+    blips = detect_punta_tacos(ch)
+    blip_indices = {idx for b in blips for idx in range(b.start_idx, b.end_idx + 1)}
 
     tem_tempo = bool(ch.times)
     zonas: List[BrakeZone] = []
@@ -335,10 +568,21 @@ def brake_zones(ch: LapChannels) -> List[BrakeZone]:
         zona.samples += 1
         if i < len(ch.gas) and ch.gas[i] > PEDAL_ON:
             zona.overlap_samples += 1
+            if i in blip_indices:
+                zona.blip_samples += 1
+            else:
+                zona.unwanted_overlap_samples += 1
         zona.end_m = metro(i)
 
     if zona is not None:
         zonas.append(zona)
+
+    for b in blips:
+        for z in zonas:
+            if (z.start_m <= b.start_m <= z.end_m) or (z.start_m <= b.end_m <= z.end_m):
+                z.punta_taco_count += 1
+                z.worst_brake_drop = max(z.worst_brake_drop, b.brake_drop)
+
     return zonas
 
 

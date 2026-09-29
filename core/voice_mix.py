@@ -75,9 +75,9 @@ CHANNELS: List[Channel] = [
     Channel(
         id="driving",
         label="Pedal, volante e marcha",
-        hint="Vícios da volta: repisada, freio largado, subesterço, troca cedo",
+        hint="Vícios da volta: repisada, freio largado, subesterço, troca cedo, punta-taco",
         prefixes=("lap:overlap", "lap:brake_", "lap:understeer", "lap:steer_",
-                  "lap:shift_", "lap:limiter", "limiter"),
+                  "lap:shift_", "lap:limiter", "limiter", "lap:punta_taco"),
         sample="Tá largando o freio de uma vez na freada da Curva 4",
     ),
     Channel(
